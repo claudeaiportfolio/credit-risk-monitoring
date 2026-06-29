@@ -1,0 +1,61 @@
+[project]
+name = "credit-risk-monitoring"
+version = "0.1.0"
+description = "Branch-correctness evaluation surface for a credit-deterioration monitoring agent (EDGAR + Companies House multi-hop investigation)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "pyyaml>=6.0",
+    # Shared portfolio packages — consumed (never re-implemented) as pinned
+    # git-subdirectory references from ai-infra-templates.
+    "agent-evals[judge] @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@agent-evals-v0.2.0#subdirectory=agent-evals",
+    "llm-provider @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@llm-provider-v0.2.0#subdirectory=llm-provider",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The shared packages are git-subdirectory (direct) references.
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/credit_risk_monitoring"]
+
+[project.scripts]
+credit-risk-eval = "credit_risk_monitoring.cli:main"
+
+[project.optional-dependencies]
+# Braintrust surfacing is opt-in: the adapter no-ops without BRAINTRUST_API_KEY,
+# but the SDK is only pulled when this extra is installed.
+braintrust = [
+    "agent-evals[braintrust] @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@agent-evals-v0.2.0#subdirectory=agent-evals",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.13",
+    "mypy>=1.11",
+    "types-pyyaml>=6.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+files = ["src"]
+ignore_missing_imports = true
