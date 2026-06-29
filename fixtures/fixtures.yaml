@@ -1,0 +1,321 @@
+# Credit-risk monitoring eval fixtures.
+#
+# Design rationale, schema, and the downstream-question-framing decision are
+# documented in fixtures/README.md — READ IT before editing these.
+#
+# Every hop was verified against PRIMARY sources (SEC EDGAR via efts.sec.gov /
+# data.sec.gov / www.sec.gov/Archives; UK Companies House). Facts that could not
+# be fetched are EXCLUDED from ground_truth and noted under verification_caveats —
+# never assert an unconfirmed fact as ground truth.
+#
+# classification:
+#   multi_hop            — chain must be traversed; agent should WIN, single-shot should FAIL
+#   single_hop_control   — healthy issuer; correct behaviour is to resolve in ONE hop and STOP
+#   trap_control         — looks like a credit event but is benign; correct behaviour is read the
+#                          exhibit, conclude benign, and STOP (tests against over-investigation)
+
+multi_hop:
+
+  - id: valaris-uk-subsidiary-charge
+    issuer: { name: "Valaris plc", cik: "0000314808", ch_number: "07023598" }
+    classification: multi_hop
+    jurisdiction: "US<->UK"
+    depth: 4
+    question: >
+      Valaris plc's 2020 Chapter 11 restructuring support agreement named several
+      UK-incorporated debtors. For its UK subsidiary Ensco Global Resources Limited,
+      what registered charge (type and date) was created during the bankruptcy, and
+      what is that company's current Companies House status?
+    ground_truth_path:
+      - step: 1
+        source: "8-K (Items 1.01/1.03/2.04)"
+        locator: "EDGAR acc 0001104659-20-096796 (2020-08-19)"
+        finding: "Chapter 11 + entry into a Restructuring Support Agreement (Exhibit 10.1); affiliate debtors are not in the 8-K body."
+        triggers: "must open Exhibit 10.1 to find the debtor entities"
+      - step: 2
+        source: "Exhibit 10.1 (RSA), Exhibit D debtor table"
+        locator: ".../000110465920096796/tm2027797d1_ex10-1.htm"
+        finding: "names UK-incorporated debtor Ensco Global Resources Ltd"
+        triggers: "UK entity resolves at Companies House, not SEC"
+      - step: 3
+        source: "Companies House company record"
+        locator: "CH 07098531 (Ensco Global Resources Limited)"
+        finding: "status Dissolved 2024-07-21 (members' voluntary winding-up)"
+        triggers: "filing history / charges"
+      - step: 4
+        source: "Companies House charges"
+        locator: "CH 07098531 /charges"
+        finding: "MR01 charge 070985310001 created 2020-09-25 (security taken mid-Chapter 11)"
+        triggers: terminal
+    expected_stop_depth: 4
+    expected_answer: >
+      An MR01 registered charge (id 070985310001) created 2020-09-25 over Ensco Global
+      Resources Limited (CH 07098531); the company is now Dissolved (2024-07-21).
+    verification_caveats: "Charge 'persons entitled' field is JS-rendered and was not fetched — excluded from ground truth."
+
+  - id: hertz-uk-receivables-charge-holder
+    issuer: { name: "Hertz Global Holdings / The Hertz Corporation", cik: "0001657853 / 0000047129" }
+    classification: multi_hop
+    jurisdiction: "US->UK"
+    depth: 4
+    question: >
+      Hertz's May 2020 Chapter 11 filing explicitly excluded its non-US/Canada
+      subsidiaries. For its UK financing entity Hertz UK Receivables Limited, which
+      bank holds its outstanding registered charges?
+    ground_truth_path:
+      - step: 1
+        source: "8-K (Items 1.01/2.04)"
+        locator: "EDGAR acc 0001104659-20-056547 (2020-05-05)"
+        finding: "missed 2020-04-27 payment on the Series 2013-G1 vehicle ABS -> amortization event; forbearance only to 2020-05-22"
+        triggers: "references a Forbearance Agreement exhibit"
+      - step: 2
+        source: "Exhibit EX-10.1 (Forbearance Agreement)"
+        locator: ".../tm2018616d1_ex10-1.htm"
+        finding: "names HVF II ABS subsidiaries; Deutsche Bank as admin agent"
+        triggers: "forbearance expiry -> bankruptcy 8-K"
+      - step: 3
+        source: "8-K (Item 1.03)"
+        locator: "EDGAR acc 0001104659-20-065674 (2020-05-26)"
+        finding: "Chapter 11 (Case 20-11218, D. Del.); explicitly EXCLUDES Hertz International Limited, Hertz Holdings Netherlands BV and non-US/Canada subsidiaries from the estate"
+        triggers: "the carve-out clause is the only text naming the international entities -> UK registry"
+      - step: 4
+        source: "Companies House"
+        locator: "CH 08789381 (Hertz UK Receivables Limited)"
+        finding: "outstanding registered charges to Credit Agricole CIB (UK analogue of the US ABS that triggered hop 1)"
+        triggers: terminal
+    expected_stop_depth: 4
+    expected_answer: >
+      Credit Agricole CIB holds the outstanding registered charges over Hertz UK
+      Receivables Limited (CH 08789381). (Sibling opco Hertz (U.K.) Limited, CH 00597994,
+      carries separate charges to Lombard North Central.)
+    verification_caveats: "A discrete rating-agency hop was not pursued; chain stands without it."
+
+  - id: revlon-elizabeth-arden-uk-charge
+    issuer: { name: "Revlon, Inc. / Revlon Consumer Products", cik: "0000887921 / 0000890547" }
+    classification: multi_hop
+    jurisdiction: "US->UK"
+    depth: 4
+    question: >
+      Revlon's 2022 Chapter 11 debtor list included a UK subsidiary. For Elizabeth
+      Arden (UK) Ltd, what registered charge was created around Revlon's 2023 emergence,
+      and which US party is the secured party (collateral agent)?
+    ground_truth_path:
+      - step: 1
+        source: "8-K (Item 1.03)"
+        locator: "EDGAR acc 0001140361-22-023182 (2022-06-16)"
+        finding: "Revlon + subsidiaries filed Chapter 11 (SDNY) 2022-06-15; filing subsidiaries 'listed in Exhibit 99.1'"
+        triggers: "must open Exhibit 99.1 for the debtor list"
+      - step: 2
+        source: "Exhibit 99.1 (debtor list)"
+        locator: "brhc10038750_ex99-1.htm (same accession)"
+        finding: "names foreign debtor 'Elizabeth Arden (UK) Ltd.'"
+        triggers: "UK entity -> Companies House"
+      - step: 3
+        source: "Companies House"
+        locator: "CH 04126357 (Elizabeth Arden (UK) Ltd)"
+        finding: "active UK ltd; 17 charges (6 outstanding); officer changes"
+        triggers: "charges expose post-emergence security"
+      - step: 4
+        source: "Companies House charge (MR01)"
+        locator: "CH 04126357 charge 0412 6357 0014"
+        finding: "charge created 2023-05-02; persons entitled: Jefferies Finance LLC (Collateral Agent)"
+        triggers: terminal
+    expected_stop_depth: 4
+    expected_answer: >
+      An MR01 charge (0412 6357 0014) created 2023-05-02 over Elizabeth Arden (UK) Ltd
+      (CH 04126357); secured party / collateral agent is Jefferies Finance LLC.
+    verification_caveats: "The 'exit-financing' characterization of the charge is INFERRED (date = emergence, named collateral agent) but the underlying credit-agreement exhibit was not opened; ground truth asserts only the charge + collateral agent, not its purpose."
+
+  - id: bbby-default-to-sp-rating
+    issuer: { name: "Bed Bath & Beyond Inc.", cik: "0000886158" }
+    classification: multi_hop
+    jurisdiction: "US-only"
+    depth: 3
+    question: >
+      After Bed Bath & Beyond's early-2023 going-concern disclosure, it reported events
+      of default under a specific credit facility. Which facility and admin agent were
+      involved, and what credit rating did S&P assign as a result (and on what date)?
+    ground_truth_path:
+      - step: 1
+        source: "8-K (Item 8.01 + Ex 99.1)"
+        locator: "EDGAR acc 0001193125-23-002004 (2023-01-05)"
+        finding: "'substantial doubt about ... ability to continue as a going concern'; names NO facility, agent, or actual default"
+        triggers: "forces a forward lookup to the concrete default"
+      - step: 2
+        source: "8-K (Item 8.01 + Ex 99.3)"
+        locator: "EDGAR acc 0001193125-23-025748 (2023-02-06)"
+        finding: "events of default ~2023-01-13 under the $1.130B ABL Facility; JPMorgan Chase (admin agent) sent a 2023-01-25 acceleration notice"
+        triggers: "dated, named-agent acceleration is what a rating agency reacts to"
+      - step: 3
+        source: "S&P Global Ratings action"
+        locator: "S&P 'BBBY Downgraded To D From CC On Expected General Default' (2023-01-27)"
+        finding: "issuer credit rating cut to D (default)"
+        triggers: terminal
+    expected_stop_depth: 3
+    expected_answer: >
+      Events of default under the $1.130B ABL Facility (admin agent JPMorgan Chase,
+      acceleration notice 2023-01-25); S&P downgraded the issuer credit rating to 'D'
+      (default) on 2023-01-27. (Deployable as a clean 2-hop default->rating.)
+    verification_caveats: "S&P press-release body is paywalled (403); rating value + date corroborated by S&P's own headline and two aggregators, full text UNCONFIRMED."
+
+  - id: greenrose-foreclosure-recipient-and-liquidation
+    issuer: { name: "The Greenrose Holding Company Inc.", cik: "0001790665" }
+    classification: multi_hop
+    jurisdiction: "US-only"
+    depth: 4
+    obscure: true
+    question: >
+      Greenrose Holding's 2022-23 distress led to a strict foreclosure on its cannabis
+      subsidiaries (Theraplant and True Harvest). Which entity received that collateral,
+      and in which court and case number did Greenrose ultimately file for liquidation?
+    ground_truth_path:
+      - step: 1
+        source: "8-K (Items 1.01/2.03/2.04)"
+        locator: "EDGAR acc 0001213900-22-063842 (2022-10-13)"
+        finding: "Forbearance over Specified Defaults under the Nov-2021 Credit Agreement; names guarantor subs Theraplant LLC and True Harvest Holdings Inc.; agent DXR Finance LLC"
+        triggers: "names subsidiaries/agent; points to exhibit-level lender stack"
+      - step: 2
+        source: "Exhibit EX-10.1 (Strict Foreclosure Agreement)"
+        locator: "EDGAR acc 0001213900-23-023263 (8-K 2023-03-27), ea175766ex10-1_greenrose.htm"
+        finding: "full lender stack — DXR Finance LLC (agent), DXR-GL Holdings I/II/III, DXR Finance Parent, DXR Finance HoldCo"
+        triggers: "DXR HoldCo + Theraplant names drive downstream lookups"
+      - step: 3
+        source: "8-K (Item 2.01)"
+        locator: "EDGAR acc 0001213900-23-058964 (2023-07-24)"
+        finding: "2023-07-21 strict foreclosure CLOSED: Theraplant & True Harvest collateral transferred to DXR Finance HoldCo ('NewCo')"
+        triggers: "wind-down -> liquidation filing"
+      - step: 4
+        source: "8-K (Item 1.03)"
+        locator: "EDGAR acc 0001213900-24-054658 (2024-06-21)"
+        finding: "Chapter 7 filed 2024-06-18, EDNY Case 8-24-72384; trustee to liquidate"
+        triggers: terminal
+    expected_stop_depth: 4
+    expected_answer: >
+      The Theraplant and True Harvest collateral was transferred to DXR Finance HoldCo
+      ('NewCo') via the 2023-07-21 strict foreclosure; Greenrose later filed Chapter 7 on
+      2024-06-18 in the EDNY (Case 8-24-72384).
+    verification_caveats: >
+      Hops 1-4 fetched & confirmed from EDGAR. A related Connecticut Appellate Court
+      foreclosure (DXR Fin. Parent v. Theraplant, 223 Conn. App. 362) exists per the
+      caption but the opinion text was not fetched -> excluded from ground truth.
+      DXR entities have NO SEC filings of their own, which is why this chain is genuinely
+      memory-proof (an obscure sub-penny OTC issuer).
+
+  - id: wejo-uk-administration
+    issuer: { name: "Wejo Group Limited", cik: "0001864448" }
+    classification: multi_hop
+    jurisdiction: "US->UK"
+    depth: 3
+    obscure: partial   # ex-"unicorn" -> headline partially memorable; question anchored on UK registry facts
+    question: >
+      Wejo Group Limited (a Bermuda-incorporated SEC registrant) entered distress in
+      2023 through a UK operating subsidiary. Which UK company entered administration,
+      what is its Companies House number, and who were the appointed joint administrators?
+    ground_truth_path:
+      - step: 1
+        source: "8-K (Item 1.03)"
+        locator: "EDGAR acc 0001864448-23-000131 (2023-05-30)"
+        finding: "Wejo Limited, an indirect wholly-owned UK subsidiary, filed a Notice of Intention to appoint an administrator (High Court, Manchester; Sch. B1 Insolvency Act 1986)"
+        triggers: "names an England-and-Wales opco distinct from the Bermuda registrant -> UK"
+      - step: 2
+        source: "8-K (Item 1.03)"
+        locator: "EDGAR acc 0001864448-23-000151 (2023-09-18); appointment first in acc 0001864448-23-000143 (2023-07-18)"
+        finding: "Wejo Limited appointed Andrew Poxon & Hilary Pascoe of Leonard Curtis as joint administrators"
+        triggers: "named UK entity + IPs -> verify at Companies House"
+      - step: 3
+        source: "Companies House"
+        locator: "CH 08813730 (Wejo Limited)"
+        finding: "status 'In Administration'; filing history shows appointment, administrators' proposal, progress reports"
+        triggers: terminal
+    expected_stop_depth: 3
+    expected_answer: >
+      Wejo Limited (CH 08813730) entered administration in 2023; joint administrators
+      Andrew Poxon and Hilary Pascoe of Leonard Curtis.
+    verification_caveats: >
+      Hops 1-3 fetched & confirmed (8-K bodies + Companies House 'In Administration').
+      Creditor detail (~GBP 104.5M claims incl. GLAS/General Motors) is press-reported,
+      not registry-fetched -> excluded from ground truth. Headline is partially memorable,
+      so the question is deliberately anchored on the registry facts, not "what happened to Wejo?".
+
+single_hop_controls:
+
+  - id: control-microsoft
+    issuer: { name: "Microsoft Corporation", cik: "0000789019" }
+    classification: single_hop_control
+    jurisdiction: "US-only"
+    depth: 1
+    question: >
+      Based on its recent SEC filings, has Microsoft disclosed any covenant waiver,
+      default, forbearance, or going-concern indicator that warrants escalation?
+    ground_truth_path:
+      - step: 1
+        source: "EDGAR submissions index"
+        locator: "data.sec.gov submissions CIK 0000789019; latest 10-K acc 0000950170-25-100235 (2025-07-30)"
+        finding: "recent 8-Ks routine (Item 5.02 officer changes, 2.02 earnings); no distress"
+        triggers: terminal
+    expected_stop_depth: 1
+    expected_answer: "No. No credit-distress events in recent filings; routine disclosures only. No further investigation warranted."
+
+  - id: control-johnson-and-johnson
+    issuer: { name: "Johnson & Johnson", cik: "0000200406" }
+    classification: single_hop_control
+    jurisdiction: "US-only"
+    depth: 1
+    question: >
+      Based on its recent SEC filings, has Johnson & Johnson disclosed any covenant
+      waiver, default, forbearance, or going-concern indicator that warrants escalation?
+    ground_truth_path:
+      - step: 1
+        source: "EDGAR submissions index"
+        locator: "data.sec.gov submissions CIK 0000200406; latest 10-K acc 0000200406-26-000016 (2026-02-11)"
+        finding: "recent 8-Ks routine (5.07 vote results, 2.02 earnings); no distress"
+        triggers: terminal
+    expected_stop_depth: 1
+    expected_answer: "No. No credit-distress events in recent filings; routine disclosures only. No further investigation warranted."
+
+  - id: control-costco
+    issuer: { name: "Costco Wholesale Corporation", cik: "0000909832" }
+    classification: single_hop_control
+    jurisdiction: "US-only"
+    depth: 1
+    question: >
+      Based on its recent SEC filings, has Costco disclosed any covenant waiver,
+      default, forbearance, or going-concern indicator that warrants escalation?
+    ground_truth_path:
+      - step: 1
+        source: "EDGAR submissions index"
+        locator: "data.sec.gov submissions CIK 0000909832; latest 10-K acc 0000909832-25-000101 (2025-10-08)"
+        finding: "recent 8-Ks routine (2.02 earnings/sales); no distress"
+        triggers: terminal
+    expected_stop_depth: 1
+    expected_answer: "No. No credit-distress events in recent filings; routine disclosures only. No further investigation warranted."
+
+trap_controls:
+
+  - id: trap-toll-brothers-benign-amendment
+    issuer: { name: "Toll Brothers, Inc.", cik: "0000794170" }
+    classification: trap_control
+    jurisdiction: "US-only"
+    depth: 1
+    question: >
+      Toll Brothers filed an 8-K (Item 1.01) on 2025-02-11 reporting a material amendment
+      to its credit agreement. Does this indicate credit deterioration requiring deeper
+      investigation of its subsidiaries and lenders?
+    ground_truth_path:
+      - step: 1
+        source: "8-K (Item 1.01) + amendment exhibits"
+        locator: "EDGAR acc 0000794170-25-000020 (2025-02-11), tol-20250207.htm"
+        finding: >
+          BENIGN: revolving credit maturity extended 2028-02-14 -> 2030-02-07 and
+          commitments increased $1.955B -> $2.35B; $650M term loan extended to 2030-02-07;
+          verbatim 'no other provisions ... were modified'. No covenant breach, waiver,
+          forbearance, or going-concern language. Lenders extending + upsizing credit to a
+          healthy borrower.
+        triggers: terminal (do NOT chase First Huntingdon Finance Corp, Mizuho/Truist agents, or any registry)
+    expected_stop_depth: 1
+    expected_answer: >
+      No. This is a benign maturity extension + commitment upsize, not credit
+      deterioration; the correct behaviour is to read the amendment, conclude benign,
+      and stop. Escalation / chasing subsidiaries here is the over-investigation failure
+      this control catches.
+    verification_caveats: "8-K body + Item 1.01 text fetched & confirmed (quotes verbatim); exhibit index confirmed present."
