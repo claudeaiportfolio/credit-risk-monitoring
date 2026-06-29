@@ -1,0 +1,42 @@
+name: python-ci
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'fixtures/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/python-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'fixtures/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen --extra dev
+
+      - run: uv run ruff check src tests
+
+      - run: uv run mypy
+
+      # Unit tests are fully offline (no network, no API keys): the loader,
+      # the trace round-trip, the Layer-1 checks, and the judge with a stub.
+      - run: uv run pytest -q

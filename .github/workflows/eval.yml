@@ -1,0 +1,47 @@
+name: eval
+
+# Live branch-correctness eval: run the single-shot baseline against EDGAR,
+# score it (Layer 1 + Layer 2 groundedness), upload the report. Manual dispatch
+# because it makes live EDGAR + Anthropic calls. The C3 agent arm will reuse
+# this same scorer once it lands.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen --extra braintrust
+
+      - name: Run single-shot baseline (real EDGAR retrieval)
+        run: uv run credit-risk-eval run-baseline --trace-dir traces/baseline
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # The baseline is EXPECTED to fail the multi-hop fixtures (that gap is the
+      # measure), so a non-zero score exit is the intended signal here, not a
+      # build break — continue-on-error keeps the artifact upload reachable.
+      - name: Score traces (Layer 1 + Layer 2 + Braintrust)
+        continue-on-error: true
+        run: uv run credit-risk-eval score --trace-dir traces/baseline --out-dir out
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BRAINTRUST_API_KEY: ${{ secrets.BRAINTRUST_API_KEY }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: |
+            out/
+            traces/
+          retention-days: 30
