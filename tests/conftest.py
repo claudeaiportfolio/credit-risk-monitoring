@@ -1,10 +1,25 @@
-"""Shared test helpers: build fixtures and traces in-memory."""
+"""Shared test helpers: build fixtures and traces in-memory, plus offline fakes
+(a scripted LLM provider and mocked HTTP transports) for the agent tests."""
 
 from __future__ import annotations
 
+from collections import deque
+from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest
+from llm_provider import (
+    Completion,
+    Message,
+    MessageDone,
+    ProviderConfig,
+    StreamEvent,
+    TextDelta,
+    ToolSpec,
+    ToolUseBlock,
+    Usage,
+)
 
 from credit_risk_monitoring.fixtures import Fixture, Hop
 from credit_risk_monitoring.sources import SourceType
@@ -84,3 +99,126 @@ def tmp_traces(tmp_path: Path) -> Path:
     d = tmp_path / "traces"
     d.mkdir()
     return d
+
+
+# ---------------------------------------------------------------------------
+# Offline LLM provider — scripted, no network. Implements the llm-provider seam
+# (complete + stream) the agent-core loop and synthesis call through.
+# ---------------------------------------------------------------------------
+def tool_turn(name: str, tool_input: dict, *, call_id: str = "tu") -> Completion:
+    """A scripted assistant turn that asks to call one tool."""
+    return Completion(
+        text="",
+        tool_calls=[ToolUseBlock(id=call_id, name=name, input=tool_input)],
+        stop_reason="tool_use",
+        model="fake-model",
+        usage=Usage(input_tokens=100, output_tokens=20),
+    )
+
+
+def final_turn(text: str) -> Completion:
+    """A scripted assistant turn that ends the loop with final text."""
+    return Completion(
+        text=text,
+        tool_calls=[],
+        stop_reason="end_turn",
+        model="fake-model",
+        usage=Usage(input_tokens=100, output_tokens=40),
+    )
+
+
+class FakeProvider:
+    """A deterministic provider: ``complete`` pops the next scripted Completion;
+    ``stream`` yields ``stream_text`` then a MessageDone. The agent loop drives it
+    like a real provider, so the tools/trace/branch logic is exercised offline."""
+
+    name = "fake"
+
+    def __init__(
+        self, completions: list[Completion] | None = None, *, stream_text: str = "final answer"
+    ) -> None:
+        self._completions: deque[Completion] = deque(completions or [])
+        self._stream_text = stream_text
+        self.complete_calls = 0
+        self.stream_calls = 0
+
+    def extend(self, completions: list[Completion]) -> None:
+        self._completions.extend(completions)
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec] | None = None,
+        config: ProviderConfig | None = None,
+    ) -> Completion:
+        self.complete_calls += 1
+        if not self._completions:
+            raise AssertionError("FakeProvider ran out of scripted completions")
+        c = self._completions.popleft()
+        # Give each tool call a unique id so the loop's pairing is unambiguous.
+        for i, tc in enumerate(c.tool_calls):
+            tc.id = f"{tc.name}-{self.complete_calls}-{i}"
+        return c
+
+    async def stream(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec] | None = None,
+        config: ProviderConfig | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.stream_calls += 1
+        yield TextDelta(text=self._stream_text)
+        yield MessageDone(
+            stop_reason="end_turn", usage=Usage(input_tokens=80, output_tokens=30)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Mocked HTTP transports for the EDGAR + Companies House clients.
+# ---------------------------------------------------------------------------
+def edgar_mock_transport(
+    *,
+    handlers: dict[str, httpx.Response] | None = None,
+    default_json: dict | None = None,
+) -> httpx.MockTransport:
+    """Route EDGAR requests by URL substring to canned responses."""
+    handlers = handlers or {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        for needle, resp in handlers.items():
+            if needle in url:
+                return resp
+        if default_json is not None:
+            return httpx.Response(200, json=default_json)
+        return httpx.Response(404, text=f"no mock for {url}")
+
+    return httpx.MockTransport(handle)
+
+
+def json_response(payload: dict, status: int = 200) -> httpx.Response:
+    return httpx.Response(status, json=payload)
+
+
+def html_response(body: str, status: int = 200) -> httpx.Response:
+    return httpx.Response(status, text=body, headers={"Content-Type": "text/html"})
+
+
+def submissions_payload(
+    name: str = "Test Issuer", forms: list[str] | None = None
+) -> dict:
+    forms = forms or ["8-K", "10-K", "8-K"]
+    n = len(forms)
+    return {
+        "name": name,
+        "filings": {
+            "recent": {
+                "form": forms,
+                "filingDate": ["2020-08-19"] * n,
+                "accessionNumber": ["0001104659-20-096796"] * n,
+                "primaryDocument": ["doc.htm"] * n,
+                "primaryDocDescription": ["8-K"] * n,
+            },
+            "files": [],
+        },
+    }

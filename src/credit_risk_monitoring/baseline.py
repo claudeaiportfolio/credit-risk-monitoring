@@ -42,7 +42,11 @@ from credit_risk_monitoring.trace import TraceWriter
 # (question, evidence_context) -> (answer_text, input_tokens, output_tokens)
 Answerer = Callable[[str, str], Awaitable[tuple[str, int, int]]]
 
-DEFAULT_BASELINE_MODEL = os.environ.get("BASELINE_MODEL", "claude-sonnet-4-5")
+# Eval-model config for the piece. The baseline runs on the same frontier model
+# as the Arm A agent (claude-opus-4-8) so the single-shot floor and the agent
+# win are measured on equal footing — the gap is the loop/branch-correctness,
+# not a model-capability delta. Env-overridable.
+DEFAULT_BASELINE_MODEL = os.environ.get("BASELINE_MODEL", "claude-opus-4-8")
 
 _SYSTEM_PROMPT = (
     "You are a credit-risk analyst screening an issuer for signs of credit "

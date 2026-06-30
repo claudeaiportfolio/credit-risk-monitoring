@@ -1,18 +1,22 @@
-.PHONY: sync test lint typecheck run-baseline score eval secret-scan
+.PHONY: sync test lint typecheck run-baseline run-agent score score-agent eval eval-agent secret-scan
 
 # Secrets live in the invocation surface, never in application code. Point
-# ENV_FILE at a .env (gitignored) carrying the keys the eval needs:
-#   ANTHROPIC_API_KEY          — llm-provider baseline completion + Layer-2 judge
+# ENV_FILE at a .env (gitignored) carrying the keys the eval/agent needs:
+#   ANTHROPIC_API_KEY          — llm-provider completion + agent loop + Layer-2 judge
 #   SEC_EDGAR_USER_AGENT       — descriptive UA SEC requires (e.g. "name email")
+#   COMPANIES_HOUSE_API_KEY    — Arm A agent UK-registry hops (key as Basic-auth user)
+#   AUDIT_DATABASE_URL         — optional; Postgres audit sink (else in-memory)
+#   AGENT_MODEL / BASELINE_MODEL / JUDGE_MODEL — optional model overrides
 #   BRAINTRUST_API_KEY         — optional; activates the Braintrust surface
-#   COMPANIES_HOUSE_API_KEY    — used by the C3 agent's UK-registry hops (not C2)
 # Usage: `make run-baseline ENV_FILE=.env`. Without it, run-baseline falls back
 # to the offline answerer and Layer-2 is skipped (Layer-1 still scores fully).
 ENV_FILE ?= .env
 UV_RUN := uv run $(if $(wildcard $(ENV_FILE)),--env-file $(ENV_FILE),)
 
 TRACE_DIR ?= traces/baseline
+TRACE_DIR_AGENT ?= traces/agent
 OUT_DIR ?= out
+OUT_DIR_AGENT ?= out/agent
 
 sync:
 	uv sync --extra dev
@@ -30,16 +34,30 @@ typecheck:
 run-baseline:
 	$(UV_RUN) credit-risk-eval run-baseline --trace-dir $(TRACE_DIR)
 
+# Run the Arm A multi-hop investigation agent over all fixtures -> traces.
+# Needs ANTHROPIC_API_KEY (loop) and COMPANIES_HOUSE_API_KEY (UK-registry hops).
+run-agent:
+	$(UV_RUN) credit-risk-eval run-agent --trace-dir $(TRACE_DIR_AGENT)
+
 # Score traces with the branch-correctness CheckSuite (+ Layer-2 judge when
 # ANTHROPIC_API_KEY is set; + Braintrust when BRAINTRUST_API_KEY is set).
 score:
 	$(UV_RUN) credit-risk-eval score --trace-dir $(TRACE_DIR) --out-dir $(OUT_DIR)
 
+# Score the Arm A agent traces (same suite, agent label + its own out dir).
+score-agent:
+	$(UV_RUN) credit-risk-eval score --trace-dir $(TRACE_DIR_AGENT) --out-dir $(OUT_DIR_AGENT) --label arm-a
+
 # Full local eval: baseline run then score. The baseline is EXPECTED to fail the
 # multi-hop fixtures (that gap is the measure), so `score`'s non-zero exit here
-# is the intended signal, not a build break — hence the trailing `|| true`.
+# is the intended signal, not a build break — hence the leading `-`.
 eval: run-baseline
 	-$(MAKE) score
+
+# Full Arm A eval: agent run then score. The agent is the arm that should WIN the
+# multi-hop fixtures the baseline fails.
+eval-agent: run-agent
+	-$(MAKE) score-agent
 
 secret-scan:
 	gitleaks dir . --redact --no-banner --exit-code 1

@@ -1,9 +1,13 @@
 """CLI for the branch-correctness eval surface.
 
-Two subcommands:
+Three subcommands:
 
 * ``run-baseline`` — run the single-shot baseline over all fixtures, writing one
   JSONL trace per fixture into ``--trace-dir``.
+* ``run-agent`` — run the Arm A multi-hop investigation agent (orchestrator +
+  sub-agents) over all fixtures, writing one JSONL trace per fixture into
+  ``--trace-dir``. Needs ``ANTHROPIC_API_KEY`` (the agent loop) and, for the
+  UK-registry hops, ``COMPANIES_HOUSE_API_KEY``.
 * ``score`` — score the traces in ``--trace-dir`` against the fixtures (Layer 1
   always; Layer 2 groundedness when ``ANTHROPIC_API_KEY`` is set), write the
   report/JSON to ``--out-dir``, and fan out to Braintrust when configured.
@@ -16,6 +20,7 @@ these with ``uv run --env-file`` so secrets live in the invocation surface.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -60,6 +65,33 @@ def _cmd_run_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run_agent(args: argparse.Namespace) -> int:
+    # Imported lazily so `run-baseline`/`score` don't pull the agent runtime.
+    from credit_risk_monitoring.agent.orchestrator import Orchestrator
+
+    fixtures = load_fixtures(args.fixtures or default_fixtures_path())
+
+    async def _run() -> list:
+        orch = Orchestrator(debug_trace_dir=args.debug_trace_dir)
+        try:
+            results = []
+            for fx in fixtures:
+                results.append(await orch.investigate(fx, trace_dir=args.trace_dir))
+            return results
+        finally:
+            orch.close()
+
+    results = asyncio.run(_run())
+    for r in results:
+        status = f"ERROR: {r.error}" if r.error else "ok"
+        print(
+            f"  {r.fixture_id:<48} depth={r.depth_reached} "
+            f"resolved={r.resolution_count} [{status}] -> {r.trace_path}"
+        )
+    print(f"wrote {len(results)} agent traces to {args.trace_dir}")
+    return 0
+
+
 def _cmd_score(args: argparse.Namespace) -> int:
     fixtures = load_fixtures(args.fixtures or default_fixtures_path())
     outcome = score_traces(
@@ -86,6 +118,19 @@ def main(argv: list[str] | None = None) -> int:
         help="force the offline answerer even if a provider key is present",
     )
     p_run.set_defaults(func=_cmd_run_baseline)
+
+    p_agent = sub.add_parser(
+        "run-agent", help="run the Arm A multi-hop investigation agent over all fixtures"
+    )
+    _add_common(p_agent)
+    p_agent.add_argument(
+        "--debug-trace-dir",
+        type=Path,
+        default=Path("traces/agent-debug"),
+        help="Directory for the agent-core per-sub-agent debug traces.",
+    )
+    # Default the agent traces to their own dir so they don't clobber baseline.
+    p_agent.set_defaults(func=_cmd_run_agent, trace_dir=Path("traces/agent"))
 
     p_score = sub.add_parser("score", help="score traces against the fixtures")
     _add_common(p_score)

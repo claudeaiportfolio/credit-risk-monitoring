@@ -27,7 +27,11 @@ Application code reads ``os.environ`` only (User-Agent, base URLs) — never a
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
+import threading
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -95,6 +99,91 @@ def _submissions_base() -> str:
     return os.environ.get("SEC_EDGAR_SUBMISSIONS_BASE", "https://data.sec.gov/submissions")
 
 
+def _archives_base() -> str:
+    """Base for filing-directory + document fetches (www.sec.gov/Archives)."""
+    return os.environ.get("SEC_EDGAR_ARCHIVES_BASE", "https://www.sec.gov/Archives")
+
+
+# ---------------------------------------------------------------------------
+# Shared HTTP primitives — rate limiting + retry/backoff
+# ---------------------------------------------------------------------------
+
+
+class RateLimiter:
+    """Minimal monotonic-clock rate limiter (>= ``min_interval`` between calls).
+
+    SEC asks for <= ~10 requests/second across data.sec.gov + www.sec.gov, so a
+    single limiter is shared across an :class:`EdgarClient`'s calls regardless of
+    which host they hit. Thread-safe so a sync client used from a thread pool
+    stays polite. ``acquire`` blocks only as long as needed.
+    """
+
+    def __init__(self, min_interval: float) -> None:
+        self._min_interval = max(0.0, min_interval)
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def acquire(self) -> None:
+        if self._min_interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            wait = self._next_allowed - now
+            if wait > 0:
+                time.sleep(wait)
+                now = time.monotonic()
+            self._next_allowed = now + self._min_interval
+
+
+# Status codes worth retrying: SEC/CH transient throttling + gateway errors.
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def request_with_retry(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    limiter: RateLimiter,
+    max_retries: int = 4,
+    backoff_base: float = 0.5,
+    backoff_cap: float = 8.0,
+    **kwargs: object,
+) -> httpx.Response:
+    """Issue one rate-limited request with bounded exponential backoff.
+
+    Honours an upstream ``Retry-After`` header when present (SEC and Companies
+    House both send it on 429). Retries transient statuses and transport errors;
+    raises ``httpx.HTTPStatusError`` on a non-retryable non-2xx, and re-raises the
+    last transport error if every attempt fails. Deterministic backoff (no
+    jitter) keeps tests reproducible; the cap bounds total wait.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        limiter.acquire()
+        try:
+            resp = client.request(method, url, **kwargs)  # type: ignore[arg-type]
+        except httpx.TransportError as exc:
+            last_exc = exc
+            if attempt >= max_retries:
+                raise
+            time.sleep(min(backoff_base * (2**attempt), backoff_cap))
+            continue
+        if resp.status_code in _RETRY_STATUS and attempt < max_retries:
+            retry_after = resp.headers.get("Retry-After")
+            delay = min(backoff_base * (2**attempt), backoff_cap)
+            if retry_after is not None:
+                with contextlib.suppress(ValueError):
+                    delay = min(float(retry_after), backoff_cap)
+            time.sleep(delay)
+            continue
+        resp.raise_for_status()
+        return resp
+    # Exhausted retries on transport errors.
+    assert last_exc is not None
+    raise last_exc
+
+
 @dataclass(frozen=True)
 class FilingRef:
     """One row from an issuer's recent-filings index."""
@@ -136,6 +225,93 @@ class SubmissionsIndex:
         return "\n".join([head, *rows])
 
 
+@dataclass(frozen=True)
+class FilingDocument:
+    """One document inside a filing's accession directory."""
+
+    name: str
+    type: str
+    description: str
+    url: str
+
+    def summary_line(self) -> str:
+        bits = [self.type or "?", self.name]
+        if self.description:
+            bits.append(f"— {self.description}")
+        return "  ".join(bits)
+
+
+@dataclass(frozen=True)
+class FilingDirectory:
+    """The contents of one accession (the 8-K + its exhibits)."""
+
+    cik: str
+    accession: str
+    primary_document_url: str
+    documents: tuple[FilingDocument, ...]
+
+    @property
+    def locator(self) -> str:
+        return f"EDGAR acc {self.accession} (CIK {self.cik})"
+
+    def exhibits(self) -> tuple[FilingDocument, ...]:
+        """Documents that look like exhibits (EX-*) rather than the primary doc."""
+        return tuple(
+            d for d in self.documents if d.type.upper().startswith("EX") or "ex" in d.name.lower()
+        )
+
+    def index_block(self, limit: int = 40) -> str:
+        head = f"Documents in {self.locator}:"
+        rows = [f"- {d.summary_line()}\n  {d.url}" for d in self.documents[:limit]]
+        if not rows:
+            rows = ["- (no documents listed)"]
+        return "\n".join([head, *rows])
+
+
+@dataclass(frozen=True)
+class FetchedDocument:
+    """A filing body or exhibit fetched as text."""
+
+    url: str
+    content_type: str
+    text: str
+
+    @property
+    def locator(self) -> str:
+        return self.url
+
+    def context_block(self, limit: int = 12000) -> str:
+        body = self.text[:limit]
+        suffix = "" if len(self.text) <= limit else f"\n…[truncated, {len(self.text)} chars total]"
+        return f"Document {self.url} ({self.content_type}):\n{body}{suffix}"
+
+
+_TAG_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
+_TAGS_RE = re.compile(r"(?s)<[^>]+>")
+_WS_RE = re.compile(r"[ \t ]+")
+_NL_RE = re.compile(r"\n\s*\n\s*\n+")
+
+
+def html_to_text(raw: str) -> str:
+    """Best-effort HTML-to-text for EDGAR filing bodies/exhibits.
+
+    EDGAR documents are large HTML; the agent only needs readable text to find
+    named entities/exhibits. We strip script/style, drop tags, unescape the few
+    entities that matter, and collapse whitespace. Deliberately dependency-free
+    (no bs4) — robustness over fidelity for an extraction-oriented read.
+    """
+    import html as _html
+
+    no_scripts = _TAG_RE.sub(" ", raw)
+    # Preserve block boundaries so entity names don't run together.
+    spaced = re.sub(r"(?i)<(br|/p|/div|/tr|/li|/h[1-6])\s*>", "\n", no_scripts)
+    text = _TAGS_RE.sub(" ", spaced)
+    text = _html.unescape(text)
+    text = _WS_RE.sub(" ", text)
+    text = _NL_RE.sub("\n\n", text)
+    return text.strip()
+
+
 def normalize_cik(cik: str) -> str:
     """EDGAR submissions paths use a zero-padded 10-digit CIK.
 
@@ -149,57 +325,151 @@ def normalize_cik(cik: str) -> str:
     return digits.zfill(10)
 
 
-class EdgarClient:
-    """Thin synchronous EDGAR client — only the one-shot index call C2 needs.
+def accession_nodashes(accession: str) -> str:
+    """``0001104659-20-096796`` -> ``000110465920096796`` (archive-path form)."""
+    digits = accession.replace("-", "").strip()
+    if not digits.isdigit():
+        raise ValueError(f"malformed accession {accession!r}")
+    return digits
 
-    Structured as the seam the C3 production spine extends (a real agent adds
-    ``fetch_filing`` / ``fetch_exhibit`` / Companies House lookups as further
-    hops); C2 builds only ``fetch_submissions_index``.
+
+# SEC asks consumers to stay at or under ~10 requests/second. One limiter is
+# shared across all of a client's calls (data.sec.gov + www.sec.gov). The
+# default 0.11s interval keeps us just under 10 req/s with headroom.
+_DEFAULT_EDGAR_INTERVAL = float(os.environ.get("SEC_EDGAR_MIN_INTERVAL", "0.11"))
+
+
+class EdgarClient:
+    """Synchronous EDGAR retrieval spine for the credit investigation.
+
+    Extends C2's one-shot submissions-index call into the full chain the Arm A
+    agent walks: recent-filings index -> a specific filing's document directory
+    -> the 8-K body and its exhibits. Every request is rate-limited (SEC's
+    ~10 req/s ceiling) and retried with backoff on transient throttling/gateway
+    errors; a descriptive ``User-Agent`` is sent (SEC 403s a generic one).
+
+    The methods map one-to-one onto the canonical retrieval source types the
+    branch-correctness scorer reads:
+
+    * ``fetch_submissions_index`` -> ``EDGAR_SUBMISSIONS_INDEX``
+    * ``fetch_filing`` (directory + body) -> ``EDGAR_FILING``
+    * ``fetch_exhibit`` (a named exhibit document) -> ``EDGAR_EXHIBIT``
     """
 
-    def __init__(self, client: httpx.Client | None = None, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        timeout: float = 30.0,
+        *,
+        limiter: RateLimiter | None = None,
+        max_retries: int = 4,
+    ) -> None:
         self._timeout = timeout
         self._client = client or httpx.Client(
             headers={"User-Agent": _user_agent(), "Accept-Encoding": "gzip, deflate"},
             timeout=timeout,
+            follow_redirects=True,
+        )
+        self._limiter = limiter or RateLimiter(_DEFAULT_EDGAR_INTERVAL)
+        self._max_retries = max_retries
+
+    def _get(self, url: str) -> httpx.Response:
+        return request_with_retry(
+            self._client, "GET", url, limiter=self._limiter, max_retries=self._max_retries
         )
 
-    def fetch_submissions_index(self, cik: str) -> SubmissionsIndex:
+    # -- hop 1: the recent-filings index -----------------------------------
+    def fetch_submissions_index(self, cik: str, *, paginate: bool = False) -> SubmissionsIndex:
         """Fetch an issuer's recent-filings index from data.sec.gov.
 
-        Raises ``httpx.HTTPStatusError`` on a non-2xx (e.g. an unknown CIK)
-        rather than papering over it — the baseline records the failure as a
-        tool_error in the trace.
+        The base document carries the most recent ~1000 filings under
+        ``filings.recent``; older filings are paginated into the files listed
+        under ``filings.files``. ``paginate=True`` follows those (each is the
+        same column-array shape at top level) and merges them in date order —
+        needed only when a target filing predates the recent window.
+
+        Raises ``httpx.HTTPStatusError`` on a non-2xx (e.g. an unknown CIK).
         """
         padded = normalize_cik(cik)
-        url = f"{_submissions_base()}/CIK{padded}.json"
-        resp = self._client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-
+        data = self._get(f"{_submissions_base()}/CIK{padded}.json").json()
         recent = data.get("filings", {}).get("recent", {})
-        forms = recent.get("form", [])
-        dates = recent.get("filingDate", [])
-        accessions = recent.get("accessionNumber", [])
-        docs = recent.get("primaryDocument", [])
-        descs = recent.get("primaryDocDescription", [])
+        filings = list(_filing_refs_from_arrays(recent))
 
-        filings: list[FilingRef] = []
-        for i in range(len(forms)):
-            filings.append(
-                FilingRef(
-                    form=forms[i],
-                    filing_date=dates[i] if i < len(dates) else "",
-                    accession=accessions[i] if i < len(accessions) else "",
-                    primary_document=docs[i] if i < len(docs) else "",
-                    primary_doc_description=descs[i] if i < len(descs) else "",
-                )
-            )
+        if paginate:
+            for extra in data.get("filings", {}).get("files", []) or []:
+                name = extra.get("name")
+                if not name:
+                    continue
+                page = self._get(f"{_submissions_base()}/{name}").json()
+                filings.extend(_filing_refs_from_arrays(page))
+
         return SubmissionsIndex(
             cik=padded,
             issuer_name=data.get("name", ""),
             filings=tuple(filings),
         )
+
+    # -- hop 2: a specific filing's directory + body -----------------------
+    def fetch_filing_directory(self, cik: str, accession: str) -> FilingDirectory:
+        """List the documents (primary doc + exhibits) inside one accession."""
+        cik_int = str(int(normalize_cik(cik)))
+        acc = accession_nodashes(accession)
+        base = f"{_archives_base()}/edgar/data/{cik_int}/{acc}"
+        data = self._get(f"{base}/index.json").json()
+        items = data.get("directory", {}).get("item", []) or []
+        docs: list[FilingDocument] = []
+        for it in items:
+            name = str(it.get("name", ""))
+            if not name or name.lower() in {"index.json", "0001.txt"}:
+                continue
+            docs.append(
+                FilingDocument(
+                    name=name,
+                    type=str(it.get("type", "")),
+                    description=str(it.get("description", "")),
+                    url=f"{base}/{name}",
+                )
+            )
+        primary = _pick_primary_document(docs)
+        return FilingDirectory(
+            cik=normalize_cik(cik),
+            accession=accession,
+            primary_document_url=primary.url if primary else "",
+            documents=tuple(docs),
+        )
+
+    def fetch_document(self, url: str) -> FetchedDocument:
+        """Fetch one filing document/exhibit and return it as readable text."""
+        resp = self._get(url)
+        ctype = resp.headers.get("Content-Type", "")
+        raw = resp.text
+        text = html_to_text(raw) if ("html" in ctype.lower() or _looks_like_html(raw)) else raw
+        return FetchedDocument(url=url, content_type=ctype or "text/plain", text=text)
+
+    def fetch_filing(
+        self, cik: str, accession: str, *, primary_document: str | None = None
+    ) -> tuple[FilingDirectory, FetchedDocument]:
+        """Fetch a filing's directory and the body of its primary document.
+
+        ``primary_document`` (from the submissions index) pins the body when the
+        directory's heuristic pick would be ambiguous; otherwise the largest /
+        first matching ``.htm`` is used.
+        """
+        directory = self.fetch_filing_directory(cik, accession)
+        body_url = ""
+        if primary_document:
+            cik_int = str(int(normalize_cik(cik)))
+            acc = accession_nodashes(accession)
+            body_url = f"{_archives_base()}/edgar/data/{cik_int}/{acc}/{primary_document}"
+        body_url = body_url or directory.primary_document_url
+        if not body_url:
+            raise ValueError(f"no primary document found for accession {accession!r}")
+        body = self.fetch_document(body_url)
+        return directory, body
+
+    def fetch_exhibit(self, url: str) -> FetchedDocument:
+        """Fetch a named exhibit document (a distinct hop from the filing body)."""
+        return self.fetch_document(url)
 
     def close(self) -> None:
         self._client.close()
@@ -209,3 +479,37 @@ class EdgarClient:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _filing_refs_from_arrays(block: dict) -> list[FilingRef]:
+    forms = block.get("form", []) or []
+    dates = block.get("filingDate", []) or []
+    accessions = block.get("accessionNumber", []) or []
+    docs = block.get("primaryDocument", []) or []
+    descs = block.get("primaryDocDescription", []) or []
+    out: list[FilingRef] = []
+    for i in range(len(forms)):
+        out.append(
+            FilingRef(
+                form=forms[i],
+                filing_date=dates[i] if i < len(dates) else "",
+                accession=accessions[i] if i < len(accessions) else "",
+                primary_document=docs[i] if i < len(docs) else "",
+                primary_doc_description=descs[i] if i < len(descs) else "",
+            )
+        )
+    return out
+
+
+def _pick_primary_document(docs: list[FilingDocument]) -> FilingDocument | None:
+    """Heuristic primary-document pick: the first non-exhibit ``.htm``."""
+    htmls = [d for d in docs if d.name.lower().endswith((".htm", ".html"))]
+    non_ex = [d for d in htmls if not d.type.upper().startswith("EX")]
+    if non_ex:
+        return non_ex[0]
+    return htmls[0] if htmls else (docs[0] if docs else None)
+
+
+def _looks_like_html(raw: str) -> bool:
+    head = raw[:512].lower()
+    return "<html" in head or "<!doctype html" in head or "<body" in head
