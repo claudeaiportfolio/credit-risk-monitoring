@@ -199,7 +199,10 @@ class Orchestrator:
             final = FinalAnswer(answer=f"[investigation incomplete: {error}]")
             stop_recommended = False
         except Exception as exc:  # noqa: BLE001 — always finish the trace
-            error = f"{type(exc).__name__}: {exc}"
+            # User-visible/trace fields carry only the exception TYPE: a crashing
+            # httpx/psycopg error can embed a credential-bearing URL/DSN in its
+            # message. The full detail goes to the log sink via logger.exception.
+            error = type(exc).__name__
             logger.exception("investigation %s crashed", fixture.id)
             tw.record_turn(stop_reason="end_turn")
             final = FinalAnswer(answer=f"[investigation crashed: {error}]")

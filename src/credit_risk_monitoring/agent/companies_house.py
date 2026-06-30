@@ -21,6 +21,7 @@ filing history. This is a production client:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 import httpx
@@ -28,6 +29,20 @@ import httpx
 from credit_risk_monitoring.sources import RateLimiter, request_with_retry
 
 _DEFAULT_BASE = "https://api.company-information.service.gov.uk"
+
+# A UK company number is 8 chars: 8 digits, or a 2-letter prefix + 6 digits
+# (SC…, NI…, OC…, etc.). We validate before interpolating into a URL path
+# because the number can originate from an LLM/exhibit — this blocks path
+# traversal / injection of extra path segments.
+_COMPANY_NUMBER_RE = re.compile(r"^[A-Za-z0-9]{8}$")
+_MAX_QUERY_LEN = 200
+
+
+def _validate_company_number(number: str) -> str:
+    n = number.strip()
+    if not _COMPANY_NUMBER_RE.match(n):
+        raise ValueError(f"invalid company number {number!r} (expected 8 alphanumerics)")
+    return n.upper()
 
 # 600 requests / 5 minutes = 1 / 0.5s. Small headroom keeps us under the ceiling.
 _DEFAULT_CH_INTERVAL = float(os.environ.get("COMPANIES_HOUSE_MIN_INTERVAL", "0.5"))
@@ -122,15 +137,18 @@ class CompaniesHouseClient:
         """Search the register by name; returns the raw ``items`` list.
 
         Used to resolve a subsidiary named in an exhibit to its registered
-        number when the number isn't already known.
+        number when the number isn't already known. The query is trimmed and
+        length-bounded (it can originate from an LLM/exhibit).
         """
+        q = " ".join(query.split())[:_MAX_QUERY_LEN]
         data = self._get(
-            "/search/companies", params={"q": query, "items_per_page": min(items, _MAX_PER_PAGE)}
+            "/search/companies", params={"q": q, "items_per_page": min(items, _MAX_PER_PAGE)}
         ).json()
         return list(data.get("items", []) or [])
 
     # -- the company record ------------------------------------------------
     def get_company(self, number: str) -> CompanyProfile:
+        number = _validate_company_number(number)
         data = self._get(f"/company/{number}").json()
         return CompanyProfile(
             number=str(data.get("company_number", number)),
@@ -159,12 +177,15 @@ class CompaniesHouseClient:
         return items
 
     def get_officers(self, number: str) -> list[dict]:
+        number = _validate_company_number(number)
         return self._paginate(f"/company/{number}/officers")
 
     def get_filing_history(self, number: str) -> list[dict]:
+        number = _validate_company_number(number)
         return self._paginate(f"/company/{number}/filing-history")
 
     def get_charges(self, number: str) -> list[Charge]:
+        number = _validate_company_number(number)
         charges: list[Charge] = []
         for raw in self._paginate(f"/company/{number}/charges"):
             persons = tuple(

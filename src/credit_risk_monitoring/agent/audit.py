@@ -135,7 +135,12 @@ class PostgresAuditSink:
             with self._conn.cursor() as cur:  # type: ignore[attr-defined]
                 cur.execute(_INSERT, event.as_row())
         except Exception as exc:  # noqa: BLE001 — never let auditing crash the run
-            logger.error("audit-log write failed (event=%s): %s", event.action, exc)
+            # Log ONLY the exception type, never the exception text: a psycopg
+            # connection error can render the full DSN (incl. password) in its
+            # message, which must not reach the log sink.
+            logger.error(
+                "audit-log write failed (event=%s): %s", event.action, type(exc).__name__
+            )
 
     def close(self) -> None:
         if self._conn is not None:

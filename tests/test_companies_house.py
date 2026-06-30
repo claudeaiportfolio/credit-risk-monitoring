@@ -123,3 +123,17 @@ def test_missing_api_key_raises_without_injected_client(monkeypatch: pytest.Monk
     monkeypatch.delenv("COMPANIES_HOUSE_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="COMPANIES_HOUSE_API_KEY"):
         CompaniesHouseClient()
+
+
+@pytest.mark.parametrize("bad", ["../../etc/passwd", "0709853", "0709853100", "07098;31", ""])
+def test_invalid_company_number_rejected_before_request(bad: str) -> None:
+    # A malformed number (e.g. from an LLM/exhibit) must never reach the URL path.
+    called = {"n": 0}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return httpx.Response(200, json={})
+
+    with _client(httpx.MockTransport(handle)) as ch, pytest.raises(ValueError, match="invalid company number"):
+        ch.get_company(bad)
+    assert called["n"] == 0  # no HTTP request issued
