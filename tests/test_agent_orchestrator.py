@@ -28,6 +28,7 @@ from tests.conftest import (
     final_turn,
     html_response,
     json_response,
+    large_submissions_payload,
     make_fixture,
     tool_turn,
 )
@@ -302,3 +303,154 @@ async def test_router_records_retrieval_failure_as_hop_error() -> None:
     tw.finish(final_text="x")
     events = json.loads("[" + ",".join(tw.to_jsonl().splitlines()) + "]")
     assert any(e["kind"] == "tool_error" for e in events)
+
+
+def _edgar_large_index(*, with_filing_body: bool = False) -> EdgarClient:
+    """EDGAR client whose recent index buries the target 8-K ~400 rows deep.
+
+    With ``with_filing_body`` it also serves the resolved filing's directory and
+    body so a form+date open can be exercised end-to-end."""
+    handlers: dict = {}
+    if with_filing_body:
+        handlers = {
+            "/index.json": json_response(
+                {
+                    "directory": {
+                        "item": [
+                            {"name": "tm2027797d1_8k.htm", "type": "8-K", "description": "8-K body"},
+                            {"name": "tm2027797d1_ex10-1.htm", "type": "EX-10.1", "description": "RSA"},
+                        ]
+                    }
+                }
+            ),
+            "tm2027797d1_8k.htm": html_response(
+                "<p>Entry into a Restructuring Support Agreement; Chapter 11.</p>"
+            ),
+        }
+    transport = edgar_mock_transport(
+        handlers=handlers,
+        default_json=large_submissions_payload(target_index=432, target_date="2020-08-19"),
+    )
+    return EdgarClient(
+        client=httpx.Client(transport=transport, follow_redirects=True), limiter=RateLimiter(0.0)
+    )
+
+
+def _exposure_router(broker: AuthorityBroker, tw: TraceWriter, edgar: EdgarClient) -> ToolRouter:
+    token = broker.mint("exposure", set(EXPOSURE_TOOLS))
+    ctx = AuthContext("exposure", token, broker, frozenset(EXPOSURE_TOOLS))
+    return ToolRouter(
+        auth=ctx, allowed_tools=EXPOSURE_TOOLS, clients=Clients(edgar=edgar), trace=tw, turn=1
+    )
+
+
+async def test_edgar_filing_opens_buried_historical_filing_as_single_filing_hop() -> None:
+    """Regression for the fix: edgar_filing resolves a buried historical accession
+    from form+date and opens it in ONE EDGAR_FILING hop (the distress chain starts
+    at the FILING, not at a separate submissions-index hop). This is the exact path
+    that was impossible before the fix (accession invisible -> hallucinated -> 404)."""
+    sink = InMemoryAuditSink()
+    broker = AuthorityBroker(audit=sink)
+    tw = _started_writer()
+    router = _exposure_router(broker, tw, _edgar_large_index(with_filing_body=True))
+
+    out = await router.call_tool(
+        "edgar_filing",
+        {"cik": "0000314808", "form_type": "8-K", "date_from": "2020-08-19",
+         "date_to": "2020-08-19"},
+    )
+
+    assert not out.startswith("ERROR")
+    assert "Restructuring Support Agreement" in out  # the real filing body was opened
+    assert "tm2027797d1_ex10-1.htm" in out  # exhibit listed -> agent can open it next
+    assert tw.depth_reached == 1  # exactly one EDGAR_FILING hop, no separate index hop
+    # The recorded hop is the FILING source type (chain starts at the filing).
+    assert any(e.tool == "edgar_filing" for e in sink.events if e.action == "execute")
+
+
+def _companies_house_fuzzy() -> CompaniesHouseClient:
+    """CH client whose name search returns many fuzzy '* GLOBAL RESOURCES *'
+    matches; only one is the real Ensco subsidiary."""
+    search_items = {
+        "items": [
+            {"company_name": "AKIDI GLOBAL RESOURCES LIMITED", "company_number": "09479817",
+             "company_status": "active"},
+            {"company_name": "ABACO GLOBAL RESOURCES LTD", "company_number": "10874367",
+             "company_status": "active"},
+            {"company_name": "ENSCO GLOBAL RESOURCES LIMITED", "company_number": "07098531",
+             "company_status": "dissolved"},
+            {"company_name": "AFFINITY GLOBAL RESOURCES LIMITED", "company_number": "10982943",
+             "company_status": "active"},
+        ]
+    }
+    profile = {
+        "company_number": "07098531", "company_name": "Ensco Global Resources Limited",
+        "company_status": "dissolved", "type": "ltd", "date_of_creation": "2009-12-01",
+    }
+    charges = {
+        "items": [
+            {"charge_code": "070985310001", "status": "outstanding", "created_on": "2020-09-25",
+             "classification": {"description": "A registered charge"},
+             "persons_entitled": [{"name": "Credit Agricole CIB"}]}
+        ],
+        "total_results": 1,
+    }
+    transport = edgar_mock_transport(
+        handlers={
+            "/search/companies": json_response(search_items),
+            "/charges": json_response(charges),
+            "/company/": json_response(profile),
+        }
+    )
+    inner = httpx.Client(transport=transport, base_url=_CH_BASE, auth=httpx.BasicAuth("k", ""))
+    return CompaniesHouseClient(client=inner, limiter=RateLimiter(0.0))
+
+
+async def test_companies_house_resolves_name_to_exact_match_in_one_hop() -> None:
+    """Regression: profile-by-name folds the name->number search into ONE registry
+    hop and picks the EXACT subsidiary (Ensco), not a fuzzy '* GLOBAL RESOURCES *'
+    sibling — so resolution is profile+charges (2 hops), not search+N profiles."""
+    sink = InMemoryAuditSink()
+    broker = AuthorityBroker(audit=sink)
+    tw = _started_writer()
+    tools = (SourceType.COMPANIES_HOUSE.value,)
+    token = broker.mint("entity_resolution", set(tools))
+    ctx = AuthContext("entity_resolution", token, broker, frozenset(tools))
+    router = ToolRouter(
+        auth=ctx, allowed_tools=tools, clients=Clients(edgar=_edgar(), companies_house=_companies_house_fuzzy()),
+        trace=tw, turn=1,
+    )
+
+    record = await router.call_tool(
+        "companies_house", {"operation": "profile", "query": "Ensco Global Resources Ltd"}
+    )
+    assert "07098531" in record  # resolved to the EXACT match, not AKIDI/ABACO/AFFINITY
+    assert "dissolved" in record
+
+    charges = await router.call_tool(
+        "companies_house", {"operation": "charges", "company_number": "07098531"}
+    )
+    assert "070985310001" in charges
+    assert tw.depth_reached == 2  # profile + charges only — no extra candidate profiling
+
+
+async def test_submissions_browse_filter_surfaces_buried_filing() -> None:
+    """The submissions-index BROWSE filter also surfaces the buried 2020 8-K's
+    accession (form+date), recorded as an EDGAR_SUBMISSIONS_INDEX hop. Unfiltered,
+    it stays hidden (the original bug)."""
+    sink = InMemoryAuditSink()
+    broker = AuthorityBroker(audit=sink)
+    tw = _started_writer()
+    router = _exposure_router(broker, tw, _edgar_large_index())
+
+    unfiltered = await router.call_tool("edgar_submissions_index", {"cik": "0000314808"})
+    assert "0001104659-20-096796" not in unfiltered
+
+    filtered = await router.call_tool(
+        "edgar_submissions_index",
+        {"cik": "0000314808", "form_type": "8-K", "date_from": "2020-01-01",
+         "date_to": "2020-12-31"},
+    )
+    assert "0001104659-20-096796" in filtered
+    assert "2020-08-19" in filtered
+    assert tw.depth_reached == 2

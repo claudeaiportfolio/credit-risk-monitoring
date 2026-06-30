@@ -216,13 +216,91 @@ class SubmissionsIndex:
     def locator(self) -> str:
         return f"data.sec.gov submissions CIK {self.cik}"
 
-    def context_block(self, limit: int = 25) -> str:
-        """Compact text rendering handed to the LLM as the sole evidence."""
-        head = f"EDGAR recent filings for {self.issuer_name} (CIK {self.cik}):"
-        rows = [f"- {f.summary_line()}" for f in self.filings[:limit]]
+    @property
+    def oldest_filing_date(self) -> str:
+        """ISO date of the oldest filing held (``""`` if none) — lets a caller
+        decide whether a requested ``date_from`` reaches before the loaded window
+        and therefore needs pagination into ``filings.files``."""
+        dates = [f.filing_date for f in self.filings if f.filing_date]
+        return min(dates) if dates else ""
+
+    def matching(
+        self,
+        *,
+        form_type: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> tuple[FilingRef, ...]:
+        """Filings matching a form type and/or inclusive ISO filing-date range.
+
+        ``form_type`` matches case-insensitively on the exact form *and* its
+        amendments (``"8-K"`` also surfaces ``"8-K/A"``). Dates are EDGAR's
+        ``YYYY-MM-DD`` strings, so lexicographic comparison is chronological.
+        This is what makes a historical filing discoverable: the issuer's recent
+        block holds ~1000 filings, far more than any sane render cap, so the model
+        narrows by form+date instead of scanning newest-first.
+        """
+        ft = form_type.strip().upper() if form_type else None
+        lo = date_from.strip() if date_from else None
+        hi = date_to.strip() if date_to else None
+        out: list[FilingRef] = []
+        for f in self.filings:
+            form = f.form.upper()
+            if ft and not (form == ft or form.startswith(ft + "/")):
+                continue
+            if lo and f.filing_date and f.filing_date < lo:
+                continue
+            if hi and f.filing_date and f.filing_date > hi:
+                continue
+            out.append(f)
+        return tuple(out)
+
+    def context_block(
+        self,
+        limit: int = 25,
+        *,
+        form_type: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> str:
+        """Compact text rendering handed to the LLM.
+
+        Unfiltered, it renders the newest ``limit`` filings (the healthy-issuer
+        screen). With any ``form_type``/``date_from``/``date_to`` it renders the
+        *matching* rows (newest first, capped at ``limit``) and reports the total
+        match count plus an overflow hint — so a 2020 8-K buried ~400 rows deep is
+        surfaced when the model knows the issuer and the rough event date.
+        """
+        filtered = bool(form_type or date_from or date_to)
+        if not filtered:
+            head = f"EDGAR recent filings for {self.issuer_name} (CIK {self.cik}):"
+            rows = [f"- {f.summary_line()}" for f in self.filings[:limit]]
+            if not rows:
+                rows = ["- (no recent filings returned)"]
+            return "\n".join([head, *rows])
+
+        matches = self.matching(form_type=form_type, date_from=date_from, date_to=date_to)
+        crit = []
+        if form_type:
+            crit.append(f"form {form_type}")
+        if date_from:
+            crit.append(f"from {date_from}")
+        if date_to:
+            crit.append(f"to {date_to}")
+        head = (
+            f"EDGAR filings for {self.issuer_name} (CIK {self.cik}) "
+            f"matching {', '.join(crit)} — {len(matches)} match(es):"
+        )
+        rows = [f"- {f.summary_line()}" for f in matches[:limit]]
         if not rows:
-            rows = ["- (no recent filings returned)"]
-        return "\n".join([head, *rows])
+            rows = ["- (no filings match this form/date filter)"]
+        lines = [head, *rows]
+        if len(matches) > limit:
+            lines.append(
+                f"… {len(matches) - limit} more match(es) not shown — narrow the "
+                "date range or form type."
+            )
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -408,6 +486,32 @@ class EdgarClient:
             issuer_name=data.get("name", ""),
             filings=tuple(filings),
         )
+
+    def find_filings(
+        self,
+        cik: str,
+        *,
+        form_type: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        paginate: bool = False,
+    ) -> tuple[FilingRef, ...]:
+        """Locate an issuer's filings by form type and/or filing-date window.
+
+        This is the *addressing* lookup that turns "the issuer's 8-K from August
+        2020" into a concrete accession — the step a real analyst does via EDGAR
+        full-text search before opening a filing. It is deliberately a helper, not
+        a scored source hop: in a credit chain the SOURCE reached is the filing,
+        not the index used to find its address (the submissions index is a scored
+        source only for the healthy-issuer screen). Paginates automatically when
+        the requested ``date_from`` predates the loaded recent window.
+        """
+        index = self.fetch_submissions_index(cik, paginate=paginate)
+        if not paginate and date_from:
+            oldest = index.oldest_filing_date
+            if oldest and date_from < oldest:
+                index = self.fetch_submissions_index(cik, paginate=True)
+        return index.matching(form_type=form_type, date_from=date_from, date_to=date_to)
 
     # -- hop 2: a specific filing's directory + body -----------------------
     def fetch_filing_directory(self, cik: str, accession: str) -> FilingDirectory:

@@ -222,3 +222,61 @@ def submissions_payload(
             "files": [],
         },
     }
+
+
+def large_submissions_payload(
+    *,
+    name: str = "Valaris plc",
+    count: int = 500,
+    target_index: int = 432,
+    target_form: str = "8-K",
+    target_date: str = "2020-08-19",
+    target_accession: str = "0001104659-20-096796",
+    target_doc: str = "tm2027797d1_8k.htm",
+    target_desc: str = "Chapter 11 / Restructuring Support Agreement",
+) -> dict:
+    """A realistic large recent-filings index (the shape the unit tests missed).
+
+    ``count`` rows newest-first (routine filings), with one distinctive target
+    filing buried at ``target_index`` — well beyond any sane newest-N render cap.
+    This reproduces the production bug: the target row is in the data structure
+    but never rendered to the model unless the index is filtered by form+date.
+    """
+    from datetime import date, timedelta
+
+    base = date(2024, 12, 31)
+    cycle = ["10-Q", "8-K", "10-K", "4", "8-K"]
+    forms: list[str] = []
+    dates: list[str] = []
+    accessions: list[str] = []
+    docs: list[str] = []
+    descs: list[str] = []
+    for i in range(count):
+        d = base - timedelta(days=i * 5)
+        # Keep routine rows off the exact target date so the target is uniquely
+        # resolvable by an exact-date window (the cadence can otherwise collide).
+        if d.isoformat() == target_date:
+            d = d - timedelta(days=1)
+        forms.append(cycle[i % len(cycle)])
+        dates.append(d.isoformat())
+        accessions.append(f"9999999999-99-{i:06d}")
+        docs.append(f"routine{i}.htm")
+        descs.append("routine filing")
+    forms[target_index] = target_form
+    dates[target_index] = target_date
+    accessions[target_index] = target_accession
+    docs[target_index] = target_doc
+    descs[target_index] = target_desc
+    return {
+        "name": name,
+        "filings": {
+            "recent": {
+                "form": forms,
+                "filingDate": dates,
+                "accessionNumber": accessions,
+                "primaryDocument": docs,
+                "primaryDocDescription": descs,
+            },
+            "files": [],
+        },
+    }
