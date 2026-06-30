@@ -10,7 +10,7 @@ dependencies = [
     # Shared portfolio packages — consumed (never re-implemented) as pinned
     # git-subdirectory references from ai-infra-templates.
     "agent-evals[judge] @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@agent-evals-v0.2.0#subdirectory=agent-evals",
-    "llm-provider @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@llm-provider-v0.2.0#subdirectory=llm-provider",
+    "llm-provider @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@llm-provider-v0.2.1#subdirectory=llm-provider",
     # The Arm A (C3a) investigation agent runs its multi-turn tool loop on the
     # shared agent runtime — consumed, never re-implemented. It pulls the
     # llm-provider seam transitively; the pin here keeps the loop version fixed.
