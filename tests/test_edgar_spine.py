@@ -18,8 +18,13 @@ from tests.conftest import (
     edgar_mock_transport,
     html_response,
     json_response,
+    large_submissions_payload,
     submissions_payload,
 )
+
+# The real Valaris 8-K the multi-hop fixtures target: a 2020 historical filing
+# buried ~400 rows deep in the recent index.
+_TARGET_ACCESSION = "0001104659-20-096796"
 
 
 def _client(transport: httpx.MockTransport) -> EdgarClient:
@@ -58,6 +63,90 @@ def test_submissions_index_pagination_merges_files() -> None:
         recent_only = edgar.fetch_submissions_index("0000000001", paginate=False)
     assert len(recent_only.filings) == 1
     assert len(merged.filings) == 3  # 1 recent + 2 paginated
+
+
+def test_historical_filing_hidden_from_unfiltered_render_but_found_by_filter() -> None:
+    """Regression: a 2020 8-K buried ~400 rows deep is invisible to the newest-N
+    screen (the bug that blocked every multi-hop fixture) but IS surfaced when the
+    index is filtered by form type + date window."""
+    transport = edgar_mock_transport(
+        default_json=large_submissions_payload(target_index=432, target_date="2020-08-19")
+    )
+    with _client(transport) as edgar:
+        idx = edgar.fetch_submissions_index("0000314808")
+
+    assert len(idx.filings) == 500
+    # The row is in the data structure...
+    assert any(f.accession == _TARGET_ACCESSION for f in idx.filings)
+    # ...but the unfiltered newest-25 render never shows it (this is the bug).
+    assert _TARGET_ACCESSION not in idx.context_block()
+    assert _TARGET_ACCESSION not in idx.context_block(limit=25)
+
+    # The form+date filter surfaces it (the fix).
+    matches = idx.matching(form_type="8-K", date_from="2020-01-01", date_to="2020-12-31")
+    accs = {f.accession for f in matches}
+    assert _TARGET_ACCESSION in accs
+    block = idx.context_block(
+        limit=50, form_type="8-K", date_from="2020-01-01", date_to="2020-12-31"
+    )
+    assert _TARGET_ACCESSION in block
+    assert "2020-08-19" in block
+
+
+def test_find_filings_locates_buried_historical_filing() -> None:
+    """The addressing lookup edgar_filing uses: resolve a historical accession
+    from form type + date window even when it is buried far below the newest set."""
+    transport = edgar_mock_transport(
+        default_json=large_submissions_payload(target_index=432, target_date="2020-08-19")
+    )
+    with _client(transport) as edgar:
+        matches = edgar.find_filings(
+            "0000314808", form_type="8-K", date_from="2020-08-19", date_to="2020-08-19"
+        )
+    assert len(matches) == 1
+    assert matches[0].accession == _TARGET_ACCESSION
+    assert matches[0].primary_document == "tm2027797d1_8k.htm"
+
+
+def test_matching_form_filter_includes_amendments_and_respects_date_bounds() -> None:
+    transport = edgar_mock_transport(
+        default_json={
+            "name": "Acme",
+            "filings": {
+                "recent": {
+                    "form": ["8-K", "8-K/A", "10-K", "8-K"],
+                    "filingDate": ["2021-03-01", "2020-06-15", "2020-02-01", "2019-12-31"],
+                    "accessionNumber": ["a-21", "a-20a", "a-20k", "a-19"],
+                    "primaryDocument": ["w.htm"] * 4,
+                    "primaryDocDescription": [""] * 4,
+                },
+                "files": [],
+            },
+        }
+    )
+    with _client(transport) as edgar:
+        idx = edgar.fetch_submissions_index("0000000001")
+
+    # form "8-K" matches the plain form AND its "/A" amendment.
+    eightks = {f.accession for f in idx.matching(form_type="8-K")}
+    assert eightks == {"a-21", "a-20a", "a-19"}
+    # date window is inclusive and chronological via ISO string comparison.
+    in_2020 = {f.accession for f in idx.matching(date_from="2020-01-01", date_to="2020-12-31")}
+    assert in_2020 == {"a-20a", "a-20k"}
+    # combined form + date.
+    combo = {f.accession for f in idx.matching(form_type="8-K", date_from="2020-01-01")}
+    assert combo == {"a-21", "a-20a"}
+
+
+def test_filtered_render_reports_overflow_when_matches_exceed_cap() -> None:
+    transport = edgar_mock_transport(
+        default_json=large_submissions_payload(count=500, target_index=432)
+    )
+    with _client(transport) as edgar:
+        idx = edgar.fetch_submissions_index("0000314808")
+    # Every 8-K across the whole span far exceeds the cap -> overflow hint shown.
+    block = idx.context_block(limit=5, form_type="8-K")
+    assert "more match(es) not shown" in block
 
 
 def test_filing_directory_and_body() -> None:

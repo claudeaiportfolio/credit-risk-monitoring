@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -75,33 +76,93 @@ Handler = Callable[["Clients", dict], HopOutcome]
 
 
 # --- handlers ---------------------------------------------------------------
+# Filtered (form/date) renders surface more rows than the newest-25 screen, since
+# a date-bounded form query legitimately returns a handful-to-dozens of filings.
+_FILTERED_RENDER_CAP = 50
+
+
 def _h_submissions_index(clients: Clients, args: dict) -> HopOutcome:
     cik = str(args["cik"])
-    index = clients.edgar.fetch_submissions_index(cik, paginate=bool(args.get("paginate", False)))
-    return HopOutcome(
-        SourceType.EDGAR_SUBMISSIONS_INDEX,
-        index.context_block(),
-        index.locator,
-        finding=f"recent-filings index for {index.issuer_name}",
+    form_type = _opt_str(args.get("form_type"))
+    date_from = _opt_str(args.get("date_from"))
+    date_to = _opt_str(args.get("date_to"))
+    paginate = bool(args.get("paginate", False))
+    filtered = bool(form_type or date_from or date_to)
+
+    index = clients.edgar.fetch_submissions_index(cik, paginate=paginate)
+    # If the model is reaching for a filing older than the loaded recent window,
+    # paginate into the older files automatically so the date filter can reach it
+    # (the recent block holds only the most recent ~1000 filings).
+    if not paginate and date_from:
+        oldest = index.oldest_filing_date
+        if oldest and date_from < oldest:
+            index = clients.edgar.fetch_submissions_index(cik, paginate=True)
+
+    text = index.context_block(
+        limit=_FILTERED_RENDER_CAP if filtered else 25,
+        form_type=form_type,
+        date_from=date_from,
+        date_to=date_to,
     )
+    if filtered:
+        n = len(index.matching(form_type=form_type, date_from=date_from, date_to=date_to))
+        finding = f"{n} filing(s) matching form/date filter for {index.issuer_name}"
+    else:
+        finding = f"recent-filings index for {index.issuer_name}"
+    return HopOutcome(SourceType.EDGAR_SUBMISSIONS_INDEX, text, index.locator, finding=finding)
 
 
 def _h_filing(clients: Clients, args: dict) -> HopOutcome:
-    url = args.get("url")
+    url = _opt_str(args.get("url"))
     if url:
-        doc = clients.edgar.fetch_document(str(url))
+        doc = clients.edgar.fetch_document(url)
         return HopOutcome(SourceType.EDGAR_FILING, doc.context_block(), doc.locator, "filing body")
+
     cik = str(args["cik"])
-    accession = str(args["accession"])
-    directory, body = clients.edgar.fetch_filing(
-        cik, accession, primary_document=args.get("primary_document")
-    )
-    text = directory.index_block() + "\n\n" + body.context_block()
+    accession = _opt_str(args.get("accession"))
+    primary_document = _opt_str(args.get("primary_document"))
+    resolved_note = ""
+
+    # If the accession is unknown, resolve it from the issuer's index by
+    # form type + filing-date window. This addressing lookup is folded INTO this
+    # one EDGAR_FILING hop (it is not a separate scored source) so a historical
+    # filing is openable from "the issuer's 8-K around <event date>".
+    if accession is None:
+        form_type = _opt_str(args.get("form_type"))
+        date_from = _opt_str(args.get("date_from"))
+        date_to = _opt_str(args.get("date_to"))
+        if not (form_type or date_from or date_to):
+            raise ValueError(
+                "edgar_filing needs an accession, a url, or a form_type/date_from/date_to "
+                "window to locate the filing"
+            )
+        matches = clients.edgar.find_filings(
+            cik, form_type=form_type, date_from=date_from, date_to=date_to
+        )
+        if not matches:
+            raise ValueError(
+                f"no filing matches form={form_type} {date_from}..{date_to} for CIK {cik}; "
+                "widen the date window or check the form type"
+            )
+        chosen = matches[0]  # newest within the window
+        accession = chosen.accession
+        primary_document = primary_document or chosen.primary_document or None
+        if len(matches) > 1:
+            others = ", ".join(f"{m.form} {m.filing_date} acc {m.accession}" for m in matches[1:6])
+            resolved_note = (
+                f"\n\n[resolved to the newest of {len(matches)} matching filings: "
+                f"opened {chosen.form} {chosen.filing_date} acc {chosen.accession}. "
+                f"Other matches: {others}. If this is the wrong filing, re-open with a "
+                "tighter date window or the exact accession.]"
+            )
+
+    directory, body = clients.edgar.fetch_filing(cik, accession, primary_document=primary_document)
+    text = directory.index_block() + "\n\n" + body.context_block() + resolved_note
     return HopOutcome(
         SourceType.EDGAR_FILING,
         text,
         directory.locator,
-        finding=f"8-K body + {len(directory.exhibits())} exhibit(s)",
+        finding=f"filing body + {len(directory.exhibits())} exhibit(s)",
     )
 
 
@@ -116,9 +177,11 @@ def _h_companies_house(clients: Clients, args: dict) -> HopOutcome:
         raise RuntimeError("Companies House client not configured (no API key)")
     ch = clients.companies_house
     op = str(args.get("operation", "profile"))
-    number = args.get("company_number")
+    number = _opt_str(args.get("company_number"))
+    query = _opt_str(args.get("query"))
     if op == "search":
-        query = str(args["query"])
+        if query is None:
+            raise ValueError("companies_house operation=search requires a query (company name)")
         items = ch.search_companies(query)
         lines = [
             f"- {it.get('company_name')} (no. {it.get('company_number')}, {it.get('company_status')})"
@@ -126,13 +189,27 @@ def _h_companies_house(clients: Clients, args: dict) -> HopOutcome:
         ]
         text = f"Companies House search for {query!r}:\n" + ("\n".join(lines) or "- (no matches)")
         return HopOutcome(SourceType.COMPANIES_HOUSE, text, f"CH search {query!r}", "registry search")
+
+    # record/charges/officers/filing_history need a company NUMBER. If the caller
+    # only has a NAME, resolve it to a number HERE (a name->number search folded
+    # INTO this one registry hop, not a separate scored source) and pick the
+    # exact-name match — so the agent resolves the right subsidiary in one hop
+    # instead of profiling every fuzzy search result.
+    resolved_note = ""
     if number is None:
-        raise ValueError(f"companies_house op {op!r} requires company_number")
+        if query is None:
+            raise ValueError(
+                f"companies_house operation={op!r} requires company_number or query (a company name)"
+            )
+        number, resolved_note = _resolve_company_number(ch, query)
     number = str(number)
     if op == "profile":
         profile = ch.get_company(number)
         return HopOutcome(
-            SourceType.COMPANIES_HOUSE, profile.context_block(), profile.locator, "company record"
+            SourceType.COMPANIES_HOUSE,
+            profile.context_block() + resolved_note,
+            profile.locator,
+            "company record",
         )
     if op == "charges":
         charges = ch.get_charges(number)
@@ -179,17 +256,43 @@ def _registry() -> dict[str, ToolDef]:
             ToolSpec(
                 name=SourceType.EDGAR_SUBMISSIONS_INDEX.value,
                 description=(
-                    "Fetch an SEC issuer's recent-filings index (data.sec.gov) by CIK. "
-                    "The right SINGLE move to screen a healthy issuer for distress — it "
-                    "shows that filings exist, not their contents."
+                    "Fetch an SEC issuer's filings index (data.sec.gov) by CIK. "
+                    "With NO filter it shows only the newest ~25 filings — the right "
+                    "SINGLE move to SCREEN a healthy issuer for distress (shows that "
+                    "filings exist, not their contents). To OPEN a specific historical "
+                    "filing whose accession you don't know, prefer edgar_filing with "
+                    "form_type + a date window (it resolves and opens in one step). "
+                    "This tool's optional form_type/date_from/date_to filter is for "
+                    "BROWSING an issuer's filing history (matching rows are returned "
+                    "with accession numbers even when they sit hundreds deep; older "
+                    "filings are paginated in automatically when date_from predates "
+                    "the recent set)."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
                         "cik": {"type": "string", "description": "Issuer CIK (any format)."},
+                        "form_type": {
+                            "type": "string",
+                            "description": (
+                                "Filter to one form, e.g. \"8-K\" (also matches its \"/A\" "
+                                "amendments), \"10-K\", \"10-Q\"."
+                            ),
+                        },
+                        "date_from": {
+                            "type": "string",
+                            "description": "Inclusive lower filing-date bound, ISO YYYY-MM-DD.",
+                        },
+                        "date_to": {
+                            "type": "string",
+                            "description": "Inclusive upper filing-date bound, ISO YYYY-MM-DD.",
+                        },
                         "paginate": {
                             "type": "boolean",
-                            "description": "Follow older paginated filing pages (default false).",
+                            "description": (
+                                "Force-follow older paginated filing pages (default false; "
+                                "set automatically when a date_from predates the recent set)."
+                            ),
                         },
                     },
                     "required": ["cik"],
@@ -202,8 +305,16 @@ def _registry() -> dict[str, ToolDef]:
                 name=SourceType.EDGAR_FILING.value,
                 description=(
                     "Open a SPECIFIC SEC filing: its document directory plus the primary "
-                    "document body (e.g. an 8-K). Provide cik+accession (preferred) or a "
-                    "direct document url. Returns the exhibit list so you can open an exhibit next."
+                    "document body (e.g. an 8-K). Returns the exhibit list so you can open "
+                    "an exhibit next. Three ways to locate it:\n"
+                    "  1. cik + accession (when you already know the accession), or\n"
+                    "  2. cik + form_type + a date window (date_from/date_to) — USE THIS to "
+                    "open a historical filing whose accession you don't know (e.g. an issuer's "
+                    "8-K around a known 2020 event): the accession is resolved for you and the "
+                    "filing opened in this one step. Use the TIGHTEST window you can — set "
+                    "date_from = date_to to the exact filing date if you know it — so the right "
+                    "filing is opened (the newest match in the window is opened), or\n"
+                    "  3. a direct www.sec.gov/Archives document url."
                 ),
                 input_schema={
                     "type": "object",
@@ -212,6 +323,21 @@ def _registry() -> dict[str, ToolDef]:
                         "accession": {
                             "type": "string",
                             "description": "Accession number, e.g. 0001104659-20-096796.",
+                        },
+                        "form_type": {
+                            "type": "string",
+                            "description": (
+                                "With a date window instead of an accession: the form to open, "
+                                "e.g. \"8-K\"."
+                            ),
+                        },
+                        "date_from": {
+                            "type": "string",
+                            "description": "Inclusive lower filing-date bound (ISO YYYY-MM-DD).",
+                        },
+                        "date_to": {
+                            "type": "string",
+                            "description": "Inclusive upper filing-date bound (ISO YYYY-MM-DD).",
                         },
                         "primary_document": {
                             "type": "string",
@@ -247,9 +373,13 @@ def _registry() -> dict[str, ToolDef]:
                 name=SourceType.COMPANIES_HOUSE.value,
                 description=(
                     "Query UK Companies House for a company named in an SEC exhibit. "
-                    "operation=search (resolve a name->number), profile (status/type), "
-                    "charges (registered security + who holds it), officers, filing_history. "
-                    "Make only the calls the question needs."
+                    "operation=profile (the company record: status/type), charges (registered "
+                    "security + who holds it), officers, filing_history, or search (raw name "
+                    "lookup). For profile/charges/officers/filing_history you may pass EITHER a "
+                    "company_number OR query=<the company name>: a name is resolved to its "
+                    "registered number for you (exact-name match) within that one call, so you "
+                    "do NOT need a separate search step and should NOT profile multiple "
+                    "candidates. Make only the calls the question needs."
                 ),
                 input_schema={
                     "type": "object",
@@ -259,7 +389,13 @@ def _registry() -> dict[str, ToolDef]:
                             "enum": ["search", "profile", "charges", "officers", "filing_history"],
                         },
                         "company_number": {"type": "string"},
-                        "query": {"type": "string", "description": "Name to search (operation=search)."},
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "A company name — used as the search term (operation=search) or "
+                                "resolved to a number for profile/charges/officers/filing_history."
+                            ),
+                        },
                     },
                     "required": ["operation"],
                 },
@@ -366,6 +502,56 @@ class ToolRouter:
             )
         )
         return outcome.result_text
+
+
+def _opt_str(value: object) -> str | None:
+    """Normalise an optional string arg: blanks/None -> None, else stripped str."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+_COMPANY_SUFFIX_RE = re.compile(
+    r"\b(limited|ltd|plc|llp|llc|inc|corporation|corp|company|co|group|holdings?)\b"
+)
+
+
+def _normalize_company_name(name: str) -> str:
+    """Fold a company name to a comparable core: lowercase, drop punctuation and
+    common legal suffixes (Ltd/Limited/PLC/…) so ``"Ensco Global Resources Ltd"``
+    and ``"ENSCO GLOBAL RESOURCES LIMITED"`` compare equal."""
+    s = re.sub(r"[^a-z0-9 ]", " ", name.lower())
+    s = _COMPANY_SUFFIX_RE.sub(" ", s)
+    return " ".join(s.split())
+
+
+def _resolve_company_number(ch: CompaniesHouseClient, query: str) -> tuple[str, str]:
+    """Resolve a company name to its registered number via search, picking the
+    EXACT normalized-name match (falling back to a containment match, then the
+    top hit). Returns ``(number, note)``; raises if the register has no matches.
+
+    This is the name->number addressing lookup, folded into the calling registry
+    hop — it is deliberately NOT recorded as a separate scored source."""
+    items = ch.search_companies(query)
+    if not items:
+        raise ValueError(f"no Companies House company matches name {query!r}")
+    nq = _normalize_company_name(query)
+    exact = [it for it in items if _normalize_company_name(str(it.get("company_name", ""))) == nq]
+    contains = [
+        it
+        for it in items
+        if nq and nq in _normalize_company_name(str(it.get("company_name", "")))
+    ]
+    chosen = (exact or contains or items)[0]
+    num = _opt_str(chosen.get("company_number"))
+    if num is None:
+        raise ValueError(f"Companies House match for {query!r} has no company number")
+    note = (
+        f"\n[resolved name {query!r} -> {chosen.get('company_name')} "
+        f"(no. {num}, status {chosen.get('company_status')})]"
+    )
+    return num, note
 
 
 def _guess_source_type(tool_name: str) -> SourceType:
