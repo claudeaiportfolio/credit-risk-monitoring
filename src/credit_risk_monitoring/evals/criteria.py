@@ -4,7 +4,8 @@ Where Layer 1 scores *the path* (right sources, right order, right depth),
 Layer 2 scores *the answer*: does the run's final text match the fixture's
 verified ``expected_answer`` **without synthesising past the retrieved
 sources**? That is a judgement call, so it runs through ``agent_evals.judge``
-(Anthropic, Haiku by default) — one call per fixture.
+(Anthropic, ``claude-sonnet-4-6`` by default for this piece — see
+``evals.score.DEFAULT_JUDGE_MODEL``, env-overridable) — one call per fixture.
 
 The judge sees the rendered trace (question, the retrieval results, the final
 answer) but not the gold answer, so we embed each fixture's ``expected_answer``

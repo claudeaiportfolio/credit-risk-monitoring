@@ -11,6 +11,10 @@ dependencies = [
     # git-subdirectory references from ai-infra-templates.
     "agent-evals[judge] @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@agent-evals-v0.2.0#subdirectory=agent-evals",
     "llm-provider @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@llm-provider-v0.2.0#subdirectory=llm-provider",
+    # The Arm A (C3a) investigation agent runs its multi-turn tool loop on the
+    # shared agent runtime — consumed, never re-implemented. It pulls the
+    # llm-provider seam transitively; the pin here keeps the loop version fixed.
+    "agent-core @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@agent-core-v0.2.0#subdirectory=agent-core",
 ]
 
 [build-system]
@@ -32,6 +36,13 @@ credit-risk-eval = "credit_risk_monitoring.cli:main"
 # but the SDK is only pulled when this extra is installed.
 braintrust = [
     "agent-evals[braintrust] @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@agent-evals-v0.2.0#subdirectory=agent-evals",
+]
+# The Arm A audit log persists to Postgres in production (connection from the
+# environment; workload-identity -> Key Vault at deploy). The driver is an
+# optional extra so credential-less CI/tests fall back to the in-memory sink
+# without pulling a native dependency.
+audit = [
+    "psycopg[binary]>=3.2",
 ]
 dev = [
     "pytest>=8.0",

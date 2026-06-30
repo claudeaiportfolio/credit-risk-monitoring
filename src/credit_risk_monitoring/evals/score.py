@@ -35,6 +35,11 @@ from credit_risk_monitoring.fixtures import Fixture
 # the judge ran.
 _VERDICT_CHECKS = ("chain_correctness", "depth_correctness")
 
+# Layer-2 judge model for the piece. Replaces C2's legacy claude-haiku-4-5
+# default with the current Sonnet generation; env-overridable so a cheaper or
+# newer judge can be swapped without code changes.
+DEFAULT_JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-sonnet-4-6")
+
 
 @dataclass
 class ScoreOutcome:
@@ -73,11 +78,15 @@ def _render_verdict_table(scored: list[ScoredRecord], by_id: dict[str, Fixture])
     return "\n".join(lines) + "\n"
 
 
-async def _run_judge_async(scored: list[ScoredRecord], fixtures: list[Fixture]) -> str:
+async def _run_judge_async(
+    scored: list[ScoredRecord], fixtures: list[Fixture], label: str
+) -> str:
     from agent_evals.judge import render_judge_run, run_judge
 
     criteria = build_criteria(fixtures)
-    judged = await run_judge(records=scored, criteria=criteria, label="baseline")
+    judged = await run_judge(
+        records=scored, criteria=criteria, model=DEFAULT_JUDGE_MODEL, label=label
+    )
     return render_judge_run(judged)
 
 
@@ -111,7 +120,7 @@ def score_traces(
         run_judge_layer2 = bool(os.environ.get("ANTHROPIC_API_KEY"))
     judge_markdown: str | None = None
     if run_judge_layer2:
-        judge_markdown = asyncio.run(_run_judge_async(scored, fixtures))
+        judge_markdown = asyncio.run(_run_judge_async(scored, fixtures, label))
     else:
         markdown += (
             "\n> _Layer-2 groundedness judge skipped — set `ANTHROPIC_API_KEY` "
