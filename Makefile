@@ -1,4 +1,4 @@
-.PHONY: sync test lint typecheck run-baseline run-agent run-agent-b score score-agent score-agent-b eval eval-agent eval-agent-b compare secret-scan teardown teardown-full
+.PHONY: sync test lint typecheck run-baseline run-agent run-agent-b score score-agent score-agent-b eval eval-agent eval-agent-b compare skill-experiment secret-scan teardown teardown-full
 
 # Secrets live in the invocation surface, never in application code. Point
 # ENV_FILE at a .env (gitignored) carrying the keys the eval/agent needs:
@@ -80,6 +80,13 @@ eval-agent-b: run-agent-b
 COMPARE_ARGS ?=
 compare:
 	$(UV_RUN) credit-risk-eval compare --trace-root traces --out-dir out/compare $(COMPARE_ARGS)
+
+# The measured Skills experiment: Arm B with vs without the investigation-
+# discipline Skill, scored by the SAME unchanged suite. Spend-aware: smoke first
+# with `make skill-experiment SKILL_ARGS="--limit 1"`. See docs/skills-experiment.md.
+SKILL_ARGS ?=
+skill-experiment:
+	$(UV_RUN) credit-risk-eval run-skill-experiment --trace-root traces/skill-exp --out-dir out/skill-exp $(SKILL_ARGS)
 
 secret-scan:
 	gitleaks dir . --redact --no-banner --exit-code 1

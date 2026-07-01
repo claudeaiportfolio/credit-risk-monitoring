@@ -158,6 +158,10 @@ class Roster:
     entity_resolution_id: str
     model: str = ARM_B_MODEL
     created: tuple[str, ...] = ()
+    # The investigation-discipline Skill attached to every agent in this roster,
+    # or "" when the roster has no Skill (the default). Set only by the measured
+    # Skills experiment — see agent_managed/skill.py and docs/skills-experiment.md.
+    skill_id: str = ""
 
 
 def custom_tools_for(names: tuple[str, ...] | list[str]) -> list[dict[str, Any]]:
@@ -186,10 +190,29 @@ def _create_agent(
     tools: list[dict[str, Any]],
     model: str,
     multiagent: dict[str, Any] | None = None,
+    skills: list[dict[str, Any]] | None = None,
 ) -> Any:
+    if skills:
+        # Managed Agents load a Skill's files from the sandbox via the built-in
+        # `read` tool, so attaching a Skill 400s at session-create unless `read`
+        # is enabled on the agent's toolset. Enable ONLY `read` (the rest of the
+        # built-in toolset stays disabled) — it is otherwise inert for this
+        # custom-tool investigation (there are no sandbox files to read besides
+        # the Skill), so the measured with/without delta remains attributable to
+        # the Skill, not to a wider tool surface.
+        tools = [
+            *tools,
+            {
+                "type": "agent_toolset_20260401",
+                "default_config": {"enabled": False},
+                "configs": [{"name": "read", "enabled": True}],
+            },
+        ]
     kwargs: dict[str, Any] = {"name": name, "model": model, "system": system, "tools": tools}
     if multiagent is not None:
         kwargs["multiagent"] = multiagent
+    if skills:
+        kwargs["skills"] = skills
     return client.beta.agents.create(**kwargs)
 
 
@@ -201,6 +224,7 @@ def ensure_roster(
     coordinator_id: str | None = None,
     exposure_id: str | None = None,
     entity_resolution_id: str | None = None,
+    skill_id: str | None = None,
 ) -> Roster:
     """Create (or reuse) the Arm B environment + agent roster and return the IDs.
 
@@ -211,12 +235,22 @@ def ensure_roster(
     runs; anything missing is created. When the coordinator must be created, its
     two sub-agents are created first so their IDs can populate the coordinator's
     ``multiagent`` roster.
+
+    ``skill_id`` (the measured Skills experiment; default: none) attaches the
+    investigation-discipline Skill to EVERY agent in the roster — the coordinator
+    (sequencing + synthesis discipline) and both retrieval sub-agents (the hop /
+    exhibit / registry / stop discipline). Because a Skill is bound at agent-create
+    time, a Skill-enabled roster is a distinct set of agents from the no-Skill
+    roster, which is exactly what the with/without measurement compares.
     """
     environment_id = environment_id or os.environ.get("ARM_B_ENV_ID")
     coordinator_id = coordinator_id or os.environ.get("ARM_B_COORDINATOR_ID")
     exposure_id = exposure_id or os.environ.get("ARM_B_EXPOSURE_ID")
     entity_resolution_id = entity_resolution_id or os.environ.get("ARM_B_ENTITY_RESOLUTION_ID")
 
+    from credit_risk_monitoring.agent_managed.skill import skill_reference
+
+    skills = [skill_reference(skill_id)] if skill_id else None
     created: list[str] = []
 
     if environment_id is None:
@@ -237,6 +271,7 @@ def ensure_roster(
                 system=EXPOSURE_SYSTEM,
                 tools=custom_tools_for(EXPOSURE_TOOLS),
                 model=model,
+                skills=skills,
             )
             exposure_id = exposure.id
             created.append("exposure")
@@ -247,6 +282,7 @@ def ensure_roster(
                 system=RESOLUTION_SYSTEM,
                 tools=custom_tools_for(RESOLUTION_TOOLS),
                 model=model,
+                skills=skills,
             )
             entity_resolution_id = resolution.id
             created.append("entity_resolution")
@@ -260,6 +296,7 @@ def ensure_roster(
                 "type": "coordinator",
                 "agents": [exposure_id, entity_resolution_id],
             },
+            skills=skills,
         )
         coordinator_id = coordinator.id
         created.append("coordinator")
@@ -274,4 +311,5 @@ def ensure_roster(
         entity_resolution_id=entity_resolution_id or "",
         model=model,
         created=tuple(created),
+        skill_id=skill_id or "",
     )

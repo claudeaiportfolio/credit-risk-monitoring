@@ -10,6 +10,7 @@ result round-trip), the roster/control-plane construction, and the cost model.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -339,6 +340,153 @@ def test_custom_tools_mirror_arm_a_tool_surface() -> None:
     assert all("input_schema" in t and t["description"] for t in tools)
     # The exposure system prompt is Arm A's own (reused, not copied).
     assert "EXPOSURE sub-agent" in EXPOSURE_SYSTEM
+
+
+# --- the measured Skills experiment (off by default) ------------------------
+def test_skill_files_include_skill_md_at_root() -> None:
+    from credit_risk_monitoring.agent_managed.skill import _skill_files
+
+    files = _skill_files()
+    names = [n for n, _, _ in files]
+    # SKILL.md must sit in a single top-level folder named for the skill (API rule).
+    assert "credit-investigation-discipline/SKILL.md" in names
+    assert all(n.split("/")[0] == "credit-investigation-discipline" for n in names)
+    md = next(body for n, body, ct in files if n.endswith("SKILL.md"))
+    assert b"name: credit-investigation-discipline" in md  # frontmatter (always in context)
+    assert all(ct.startswith("text/") for _, _, ct in files)
+
+
+def test_ensure_skill_creates_then_reuses(monkeypatch: Any) -> None:
+    from credit_risk_monitoring.agent_managed import skill as skill_mod
+
+    created: list[dict] = []
+
+    class _SkillsClient:
+        def __init__(self) -> None:
+            class _Skills:
+                def list(self) -> list[Any]:
+                    return []  # nothing existing -> ensure_skill uploads
+
+                def create(self, **kw: Any) -> SimpleNamespace:
+                    created.append(kw)
+                    return SimpleNamespace(id="skill_fake")
+
+            self.beta = SimpleNamespace(skills=_Skills())
+
+    monkeypatch.delenv("ARM_B_SKILL_ID", raising=False)
+    client = _SkillsClient()
+    assert skill_mod.ensure_skill(client) == "skill_fake"
+    assert len(created) == 1
+    assert any(n.endswith("SKILL.md") for n, _, _ in created[0]["files"])
+    # A supplied id short-circuits the upload (control-plane reuse).
+    assert skill_mod.ensure_skill(client, skill_id="skill_pinned") == "skill_pinned"
+    assert len(created) == 1
+
+
+def test_roster_attaches_skill_to_every_agent() -> None:
+    client = _RecordingRosterClient()
+    roster = ensure_roster(client, model="claude-opus-4-8", skill_id="skill_x")
+    assert roster.skill_id == "skill_x"
+    # All three agents carry the custom-Skill reference.
+    for agent in client.agents_created:
+        assert agent["skills"] == [{"type": "custom", "skill_id": "skill_x", "version": "latest"}]
+
+
+def test_roster_has_no_skill_by_default() -> None:
+    client = _RecordingRosterClient()
+    roster = ensure_roster(client, model="claude-opus-4-8")
+    assert roster.skill_id == ""
+    assert all("skills" not in a for a in client.agents_created)  # Arm B default: no Skill
+
+
+def test_orchestrator_defaults_to_no_skill(tmp_path: Path, monkeypatch: Any) -> None:
+    """Trace records skills_enabled=False when the roster has no Skill (the default)."""
+    monkeypatch.delenv("ARM_B_USE_SKILL", raising=False)
+    script = [
+        _ctu("edgar_submissions_index", {"cik": "0000789019"}, "s1", "t-exp"),
+        {"type": "agent.message", "content": [{"type": "text", "text": "no distress."}]},
+        {"type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
+    ]
+    orch = _orchestrator(script, {"input_tokens": 5, "output_tokens": 2}, ch=False)
+    assert orch.use_skill is False  # env unset -> off
+    fixture = make_fixture(id="fx", chain=[SourceType.EDGAR_SUBMISSIONS_INDEX], expected_stop_depth=1)
+    result = orch.investigate(fixture, trace_dir=tmp_path / "t")
+    meta = json.loads(result.trace_path.read_text(encoding="utf-8").splitlines()[0])
+    assert meta["skills_enabled"] is False
+
+
+class _FakeExperimentClient:
+    """Fake ``anthropic.Anthropic().beta`` covering skills + roster + the session loop."""
+
+    def __init__(self, script: list[dict], usage: dict) -> None:
+        self.agents_created: list[dict] = []
+        self.archived: list[str] = []
+        outer = self
+
+        class _Skills:
+            def list(self) -> list[Any]:
+                return []
+
+            def create(self, **kw: Any) -> SimpleNamespace:
+                return SimpleNamespace(id="skill_fake")
+
+        class _Agents:
+            def create(self, **kw: Any) -> SimpleNamespace:
+                outer.agents_created.append(kw)
+                return SimpleNamespace(id=f"agent_{kw['name']}_{len(outer.agents_created)}", version=1)
+
+            def archive(self, agent_id: str) -> None:
+                outer.archived.append(agent_id)
+
+        class _Envs:
+            def create(self, **kw: Any) -> SimpleNamespace:
+                return SimpleNamespace(id="env_new")
+
+        self.beta = SimpleNamespace(
+            skills=_Skills(), agents=_Agents(), environments=_Envs(),
+            sessions=_FakeSessions(script, usage),
+        )
+
+
+def test_skill_experiment_runs_and_scores_both_variants(tmp_path: Path, monkeypatch: Any) -> None:
+    from credit_risk_monitoring.agent_managed.skill_experiment import run_skill_experiment
+
+    monkeypatch.delenv("ARM_B_ENV_ID", raising=False)
+    monkeypatch.delenv("ARM_B_SKILL_ID", raising=False)
+    fixture = make_fixture(
+        id="fx-multi",
+        classification="multi_hop",
+        chain=[SourceType.EDGAR_FILING, SourceType.EDGAR_EXHIBIT,
+               SourceType.COMPANIES_HOUSE, SourceType.COMPANIES_HOUSE],
+    )
+    script = [
+        _ctu("edgar_filing", {"cik": "0000314808", "accession": "0001104659-20-096796"}, "s1", "t"),
+        _ctu("edgar_exhibit", {"url": "https://www.sec.gov/Archives/x/ex10-1.htm"}, "s2", "t"),
+        _ctu("companies_house", {"operation": "profile", "company_number": "07098531"}, "s3", "t"),
+        _ctu("companies_house", {"operation": "charges", "company_number": "07098531"}, "s4", "t"),
+        {"type": "agent.message", "content": [{"type": "text", "text":
+            "MR01 charge 070985310001 over Ensco Global Resources Limited (CH 07098531); Dissolved."}]},
+        {"type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
+    ]
+    usage = {"input_tokens": 1500, "output_tokens": 300}
+    client = _FakeExperimentClient(script, usage)
+    clients = Clients(edgar=_edgar(), companies_house=_companies_house())
+
+    table = run_skill_experiment(
+        [fixture], trace_root=tmp_path / "traces", out_root=tmp_path / "out",
+        client=client, clients=clients,
+    )
+
+    # Two rosters (no-skill then skill) => 6 agents; only the skill roster's 3 carry skills.
+    assert len(client.agents_created) == 6
+    with_skill = [a for a in client.agents_created if "skills" in a]
+    assert len(with_skill) == 3
+    assert all(a["skills"][0]["skill_id"] == "skill_fake" for a in with_skill)
+    # Cleanup archived every created agent (no orphans).
+    assert len(client.archived) == 6
+    # The table renders both variants + the delta section; sidecar json written.
+    assert "no-skill" in table and "skill" in table and "Measured delta" in table
+    assert (tmp_path / "out" / "experiment.json").exists()
 
 
 def test_token_cost_opus_pricing() -> None:

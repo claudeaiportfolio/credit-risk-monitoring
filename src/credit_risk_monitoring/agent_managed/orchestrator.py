@@ -167,6 +167,11 @@ class ManagedOrchestrator:
     roster: Roster | None = None
     model: str = ARM_B_MODEL
     title_prefix: str = "credit-risk arm-b"
+    # Measured Skills experiment: attach the investigation-discipline Skill to the
+    # roster. OFF by default (Arm B ships no Skill); the ``ARM_B_USE_SKILL`` env
+    # flag or an explicit ``use_skill=True`` opts in. Ignored when a ``roster`` is
+    # injected — the injected roster's own ``skill_id`` then governs.
+    use_skill: bool | None = None
 
     _owns_clients: bool = field(default=False, init=False)
 
@@ -176,12 +181,22 @@ class ManagedOrchestrator:
         if self.clients is None:
             self.clients = build_clients()
             self._owns_clients = True
+        if self.use_skill is None:
+            from credit_risk_monitoring.agent_managed.skill import env_use_skill
+
+            self.use_skill = env_use_skill()
         if self.roster is None:
-            self.roster = ensure_roster(self.client, model=self.model)
+            skill_id = None
+            if self.use_skill:
+                from credit_risk_monitoring.agent_managed.skill import ensure_skill
+
+                skill_id = ensure_skill(self.client)
+            self.roster = ensure_roster(self.client, model=self.model, skill_id=skill_id)
 
     # -- one investigation --------------------------------------------------
     def investigate(self, fixture: Fixture, *, trace_dir: Path) -> ManagedRunResult:
         assert self.roster is not None and self.clients is not None
+        skill_on = bool(self.roster.skill_id)
         tw = TraceWriter(
             run_id=f"arm-b/{fixture.id}",
             query_id=fixture.id,
@@ -189,9 +204,10 @@ class ManagedOrchestrator:
             question=fixture.question,
             model=self.model,
             expected_chain=fixture.expected_chain_values,
-            skills_enabled=False,
-            prompt_version="c3b-arm-b-managed-v1",
-            note="arm-b-managed-agents-coordinator-subagents",
+            skills_enabled=skill_on,
+            prompt_version="c3b-arm-b-managed-v1" + ("-skill" if skill_on else ""),
+            note="arm-b-managed-agents-coordinator-subagents"
+            + ("-with-skill" if skill_on else ""),
         )
         tw.start()
         tw.record_turn(stop_reason="tool_use")  # the coordinator's opening turn
