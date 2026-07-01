@@ -557,14 +557,19 @@ class EdgarClient:
 
         ``primary_document`` (from the submissions index) pins the body when the
         directory's heuristic pick would be ambiguous; otherwise the largest /
-        first matching ``.htm`` is used.
+        first matching ``.htm`` is used. The pin is honored ONLY if it names a
+        document that actually exists in this accession's directory: a guessed or
+        stale filename falls back to the directory's own primary pick rather than
+        constructing a URL that 404s (which would otherwise abort an
+        investigation on a hallucinated filename).
         """
         directory = self.fetch_filing_directory(cik, accession)
         body_url = ""
         if primary_document:
-            cik_int = str(int(normalize_cik(cik)))
-            acc = accession_nodashes(accession)
-            body_url = f"{_archives_base()}/edgar/data/{cik_int}/{acc}/{primary_document}"
+            match = next(
+                (d for d in directory.documents if d.name == primary_document), None
+            )
+            body_url = match.url if match else ""
         body_url = body_url or directory.primary_document_url
         if not body_url:
             raise ValueError(f"no primary document found for accession {accession!r}")

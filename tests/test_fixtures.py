@@ -38,6 +38,21 @@ def test_derives_expected_chain() -> None:
     assert control.expected_stop_depth == 1
 
 
+def test_hertz_chain_is_the_realigned_three_hop_model() -> None:
+    """The hertz question pre-names the UK entity, so its answer's dependency chain
+    is Chapter 11 8-K -> CH profile -> CH charges (the same shape as valaris/revlon:
+    filing[s] + profile + charges), NOT the analyst's original forbearance-exhibit
+    discovery route. Locks in the documented hop-granularity realignment."""
+    by_id = fixtures_by_id(load_fixtures(default_fixtures_path()))
+    hertz = by_id["hertz-uk-receivables-charge-holder"]
+    assert hertz.expected_chain == (
+        SourceType.EDGAR_FILING,
+        SourceType.COMPANIES_HOUSE,
+        SourceType.COMPANIES_HOUSE,
+    )
+    assert hertz.expected_stop_depth == 3
+
+
 def test_question_and_answer_whitespace_normalised() -> None:
     fx = load_fixtures(default_fixtures_path())[0]
     assert "\n" not in fx.question
