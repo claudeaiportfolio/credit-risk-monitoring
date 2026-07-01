@@ -1,4 +1,4 @@
-.PHONY: sync test lint typecheck run-baseline run-agent run-agent-b score score-agent score-agent-b eval eval-agent eval-agent-b compare secret-scan cluster-stop cluster-start teardown teardown-full
+.PHONY: sync test lint typecheck run-baseline run-agent run-agent-b score score-agent score-agent-b eval eval-agent eval-agent-b compare secret-scan teardown teardown-full
 
 # Secrets live in the invocation surface, never in application code. Point
 # ENV_FILE at a .env (gitignored) carrying the keys the eval/agent needs:
@@ -85,17 +85,10 @@ secret-scan:
 	gitleaks dir . --redact --no-banner --exit-code 1
 
 # --- Infra lifecycle (Arm A production hosting; see terraform/README.md) -----
-# Stop (reversible) the SHARED AKS cluster — never delete it.
-cluster-stop:
-	az aks stop --name localk8scluster --resource-group kubernetes
-
-cluster-start:
-	az aks start --name localk8scluster --resource-group kubernetes
-
-# Delete THIS solution's OWN resource group only.
-teardown:
-	az group delete --name credit-risk-monitoring-rg --yes --no-wait
-
-# Full teardown standard: delete this solution's OWN RG and STOP (never delete)
-# the shared cluster. Stop is reversible via `make cluster-start`.
-teardown-full: teardown cluster-stop
+# This solution runs entirely on Azure Container Apps (a run-to-completion Job) +
+# a private-endpoint Postgres — it uses NO AKS. Teardown therefore deletes only
+# this solution's OWN resource group; the shared VNet / private-DNS zones (and the
+# shared AKS cluster) are left untouched — nothing of ours runs on them. The RG
+# name is read from Terraform state, never hardcoded.
+teardown teardown-full:
+	az group delete --name "$$(cd terraform && terraform output -raw resource_group_name)" --yes --no-wait

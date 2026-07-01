@@ -105,8 +105,10 @@ The app reads (all from `os.environ`): `ANTHROPIC_API_KEY`,
    ```
    Confirm the run reads its KV secrets and reaches Postgres over the private
    endpoint (check the job execution logs in Log Analytics).
-8. **Teardown**: `make teardown-full` (deletes THIS RG + `az aks stop` the
-   shared cluster; never deletes shared infra).
+8. **Teardown**: `make teardown-full` — deletes only THIS solution's own
+   resource group. This piece runs entirely on Azure Container Apps + a
+   private-endpoint Postgres and uses **no AKS**, so there is no shared cluster
+   to stop; the shared VNet / private-DNS zones are left untouched.
 
 ## Backend config values (for `-backend-config`)
 
