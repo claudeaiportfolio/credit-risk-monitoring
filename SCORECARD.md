@@ -208,6 +208,29 @@ A full third eval on it would be misleading: same loop → ~identical task resul
 plus added our-side latency. Documenting the rejection is the honest deliverable;
 a fabricated fourth column would not be.
 
+### Managed Agents Skills — measured, not adopted
+
+The scoping doc requires the Arm B "use a Skill?" decision be made by **fresh
+measurement on this eval, not assumed**. We built an investigation-discipline
+Skill and measured Arm B with vs without it over the 6 multi-hop fixtures (full
+detail + reproduction: [`docs/skills-experiment.md`](docs/skills-experiment.md)):
+
+| variant | branch-correct | grounded (>=2/3) | cost $ | mean latency |
+|---|---|---|---|---|
+| no-skill | **3/6** | **6/6** | **$2.98** | 141.0s |
+| skill | 2/6 | 4/6 | $3.44 (+16%) | 158.8s |
+
+The Skill **lowered** quality (branch-correct 3→2, grounded 6→4) at higher cost
+and latency — clearest on hertz, where its "stop when the picture resolves"
+guidance made the agent stop early (depth 4 / 3-of-3 grounded → depth 2 / 0-of-3).
+**Verdict: not adopted** — Arm B ships Skill-free; the Skill + harness stay in-repo
+behind an off-by-default flag as the recorded measurement. A genuine negative
+result. (A coupling found en route, and a small buy-vs-build data point in itself:
+MA Skills load their files from the sandbox via the built-in `read` tool, so a
+Skill 400s at session-create unless the built-in toolset is enabled — a managed
+feature that assumes the managed sandbox, which a pure host-side-custom-tool design
+doesn't use.)
+
 ---
 
 ## Residency as an architected choice (the FDE judgment)
@@ -268,7 +291,10 @@ code, not a certified system. Three controls carry it:
   production (in-memory fallback otherwise). Because the auth boundary is checked
   **on every call** against token scope + TTL + deny-list + admin-revoke, a
   revoke takes effect **mid-workflow** — and the audit log is the durable record
-  that proves what the kill-switch did.
+  that proves what the kill-switch did. The **buy-vs-build landscape** for this
+  primitive — mapping it to Okta Cross App Access / FGA / managed revocation, with
+  the honest when-to-build-vs-buy call — is in
+  [`docs/agent-authz-landscape.md`](docs/agent-authz-landscape.md).
 - **Residency as an architected choice** — as above: public-only persisted state,
   transient sensitive input, and an explicit read of which arm each data
   classification permits.

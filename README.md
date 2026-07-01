@@ -585,6 +585,8 @@ terraform/           # Arm A (build) production hosting: ACA Job + KV + private-
 Dockerfile           # Arm A agent container image (env-only config)
 SCORECARD.md         # the build-vs-buy scorecard (headline result)
 docs/build-vs-buy.md # visual summary (arm architecture + cost/latency/quality charts)
+docs/agent-authz-landscape.md # runtime-authz/kill-switch primitive -> Okta buy-vs-build
+docs/skills-experiment.md     # measured Arm B with/without a Managed Agents Skill (not adopted)
 ```
 
 ## CI
