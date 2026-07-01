@@ -328,6 +328,7 @@ source = { editable = "." }
 dependencies = [
     { name = "agent-core" },
     { name = "agent-evals", extra = ["judge"] },
+    { name = "anthropic" },
     { name = "httpx" },
     { name = "pyyaml" },
 ]
@@ -352,6 +353,7 @@ requires-dist = [
     { name = "agent-core", git = "https://github.com/claudeaiportfolio/ai-infra-templates.git?subdirectory=agent-core&rev=agent-core-v0.2.1" },
     { name = "agent-evals", extras = ["braintrust"], marker = "extra == 'braintrust'", git = "https://github.com/claudeaiportfolio/ai-infra-templates.git?subdirectory=agent-evals&rev=agent-evals-v0.2.0" },
     { name = "agent-evals", extras = ["judge"], git = "https://github.com/claudeaiportfolio/ai-infra-templates.git?subdirectory=agent-evals&rev=agent-evals-v0.2.0" },
+    { name = "anthropic", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'audit'", specifier = ">=3.2" },
