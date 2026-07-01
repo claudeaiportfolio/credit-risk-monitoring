@@ -8,28 +8,54 @@ to prove: a real credit signal is a *downstream* fact reachable only by walking
 that chain, and the agent's value is **branch correctness** — taking the right
 sources, in the right dependency order, to the right depth, and stopping.
 
-## Status — what's built
+## The build-vs-buy thesis and headline
 
-This repo is delivered in workstreams:
+This repo is a controlled **build-vs-buy** comparison. Once you accept that an
+agent beats a single-shot baseline on this task, the real question is whether to
+**run the agent loop yourself (build)** or **buy a managed multi-agent runtime
+(buy)**. Three arms answer it, all scored the same way:
+
+- **Baseline** — single-shot (one retrieval). The floor.
+- **Arm A (build)** — a self-hosted raw-SDK multi-hop loop on `agent-core`.
+- **Arm B (buy)** — the **same** investigation on **Anthropic Managed Agents**.
+
+**Headline (measured, all 10 fixtures, one run):** build and buy **tie on task
+quality** — both **7/10 branch-correct** on the **same** seven fixtures (same
+wins, same residuals; Arm B edges groundedness 10/10 vs 9/10). They differ only
+on **operational** axes: buy costs **~4x**, runs **~3.4x slower**, and is **ZDR /
+HIPAA-ineligible** (Anthropic hosts the loop, so retrieved content flows through
+Anthropic inference). Build wins cost / latency / residency; buy wins maintenance
+(no loop or infra to run). Neither is universally better — it is a
+residency / cost / latency vs maintenance trade.
+
+➡️ **Full numbers, per-fixture verdicts, and the "when to choose" guidance:
+[`SCORECARD.md`](SCORECARD.md)** (visual summary in
+[`docs/build-vs-buy.md`](docs/build-vs-buy.md)).
+
+## Status — what's built (all merged to `main`)
 
 | Workstream | Scope | State |
 |---|---|---|
-| Fixtures | 10 verified credit-deterioration fixtures (`fixtures/`) | done (branch `feat/eval-fixtures`) |
+| Fixtures | 10 verified credit-deterioration fixtures (`fixtures/`) | done |
 | C2 — eval surface + single-shot baseline | the floor | done |
-| C3a — Arm A agent | the self-hosted multi-hop investigation agent (`src/credit_risk_monitoring/agent/`) | done |
-| **C4 — Arm B agent** | the SAME investigation on **Anthropic Managed Agents** (`src/credit_risk_monitoring/agent_managed/`) | **done (this branch)** |
+| C3a — Arm A agent (**build**) | the self-hosted multi-hop investigation agent (`src/credit_risk_monitoring/agent/`) | done |
+| C3b — Arm A production hosting | Terraform: Azure Container Apps **Job** + Key Vault + private-endpoint Postgres audit sink (`terraform/`) | done — **deployed, smoke-passed, torn down** |
+| C4 — Arm B agent (**buy**) | the SAME investigation on **Anthropic Managed Agents** (`src/credit_risk_monitoring/agent_managed/`) | done |
+| Capstone | build-vs-buy scorecard + this README | done ([`SCORECARD.md`](SCORECARD.md)) |
 
 **C2** built the evaluation surface the agent is graded on, plus a deliberately
 weak single-shot baseline that establishes the floor. **C3a** added **Arm A** —
-the *self-hosted* raw-SDK multi-hop investigation agent (the **build** side).
-**C4 (this branch)** adds **Arm B** — the **same** multi-hop investigation on
-**Anthropic Managed Agents** (the **buy** side): a coordinator + sub-agent roster
-where Anthropic runs the multi-agent loop and hosts tool execution. The
-run-trace format and the scorer are agent-agnostic, so all three arms — baseline,
-Arm A, Arm B — emit the **same** trace and are scored by the **same**
-`CheckSuite`, unchanged, which is what makes the build-vs-buy comparison
-apples-to-apples. (The ACA/Terraform deploy and the self-hosted-sandbox column
-are out of scope for this branch.)
+the *self-hosted* raw-SDK multi-hop investigation agent (the **build** side) —
+and **C3b** took it to a real **Azure Container Apps** deployment (see
+[ACA production deployment](#arm-a-production-deployment-aca)). **C4** added
+**Arm B** — the **same** multi-hop investigation on **Anthropic Managed Agents**
+(the **buy** side): a coordinator + sub-agent roster where Anthropic runs the
+multi-agent loop and hosts tool execution. The run-trace format and the scorer
+are agent-agnostic, so all three arms — baseline, Arm A, Arm B — emit the
+**same** trace and are scored by the **same** `CheckSuite`, unchanged, which is
+what makes the build-vs-buy comparison apples-to-apples. A **self-hosted Managed
+Agents sandbox** was **evaluated and rejected** (it recovers no residency for
+this workload — see [that finding](#self-hosted-managed-agents-sandbox--rejected)).
 
 ## What the eval measures
 
@@ -191,6 +217,35 @@ audit log falls back to in-memory without them). The offline unit tests cover th
 orchestrator, both clients, the kill-switch, the audit log, and the full trace
 round-trip through the suite — no keys or network required.
 
+## Arm A production deployment (ACA)
+
+Arm A is the **build** side, so it is taken all the way to a real cloud
+deployment. `terraform/` provisions Arm A onto **Azure Container Apps as a Job**
+(`workload_kind = "job"`, manual on-demand trigger), VNet-integrated on an
+internal environment with **no public ingress**, its secrets read from this
+solution's **own Key Vault** via a **user-assigned managed identity**, and its
+audit log written to a **private-endpoint Postgres** sink. Per portfolio
+convention the dir holds only module *invocations* + wiring; the module bodies
+(`postgres`, `aca`) live in `portfolio-infra` and are consumed at pinned
+`tf-modules-vX.Y.Z` refs.
+
+**A Job, not a Container App, on purpose.** Arm A is *episodic*: the entrypoint
+(`credit-risk-eval run-agent`) runs one investigation to completion and exits. A
+scale-to-zero Container App with no ingress would deploy green but never wake — a
+facade. A Job with a manual trigger is the correct primitive and lets an operator
+start a real run with `az containerapp job start`.
+
+**Deployment status: applied, smoke-tested, torn down.** The stack was deployed
+live to Azure, an on-demand job execution was started and **ran to completion
+(Succeeded)** — reading its Key Vault secrets and reaching Postgres over the
+private endpoint — and then torn down via `make teardown-full` (which deletes
+only this solution's *own* resource group; this piece uses **no AKS**, so there
+is no shared cluster to stop). Design decisions and documented deviations (secret
+values passing through Terraform state; KV public-network-access default;
+plain UAMI vs the shared `identity` module) are recorded in
+[`terraform/README.md`](terraform/README.md), which also carries the full deploy
+runbook.
+
 ## Arm B — the same investigation on Anthropic Managed Agents (build-vs-buy)
 
 `src/credit_risk_monitoring/agent_managed/` is **Arm B**: the **same** multi-hop
@@ -319,7 +374,7 @@ multi-agent loop reproduces the self-hosted loop's investigative discipline on
 the identical tool surface** — the arms differ on the *operational* axes, not the
 answer. Arm B costs **~4x** Arm A ($3.33 vs $0.83, driven by ~5.4x the output
 tokens — the coordinator + two sub-agent threads each hold their own context) and
-runs **~3.3x slower** (963s vs 287s wall-clock — the managed round-trip +
+runs **~3.4x slower** (963s vs 287s wall-clock — the managed round-trip +
 fan-out): the price of not running the loop yourself.
 <!-- COMPARE_TABLE_END -->
 
@@ -327,7 +382,7 @@ All three arms are surfaced to **Braintrust** (project `agent-evals`, run labels
 `baseline` / `arm-a` / `arm-b`):
 <https://www.braintrust.dev/app/aiportfolio/p/agent-evals>.
 
-### Build-vs-buy observations (data points for the later scorecard)
+### Build-vs-buy observations (consolidated in [`SCORECARD.md`](SCORECARD.md))
 
 - **Maintenance** — Arm B is *no loop and no infra to run*: no `agent-core`
   loop, no ACA service, no container lifecycle — Anthropic runs the multi-agent
@@ -344,6 +399,22 @@ All three arms are surfaced to **Braintrust** (project `agent-evals`, run labels
 - **Performance** — see `wall-clock s` / branch-correctness. Both arms should
   win the multi-hop fixtures the baseline fails and stop at depth 1 on the
   controls/trap; the latency delta is the managed round-trip + fan-out.
+
+### Self-hosted Managed Agents sandbox — rejected
+
+A self-hosted Managed Agents sandbox (`config.type=self_hosted`) was
+**evaluated and deliberately not built** — a documented finding, not a gap. It
+only moves **built-in tool execution** (bash / file / code) onto your infra; the
+**agent loop and model inference stay on Anthropic**. Arm B already runs its
+retrieval as **custom tools host-side**, so the sandbox is not used for retrieval
+at all — there is nothing to relocate. Self-hosting it therefore recovers **no
+residency** (the retrieved content still flows through Anthropic inference, so
+still ZDR / HIPAA-ineligible), gains **no measured performance**, and pushes
+**maintenance back to you**. Conclusion: **complexity with no value for this
+workload.** A full third eval on it would be misleading — same loop → ~identical
+task results plus our-side latency — so the honest deliverable is the documented
+rejection, not a fabricated fourth column. (See `agent_managed/roster.py` and the
+[scorecard](SCORECARD.md#self-hosted-managed-agents-sandbox--evaluated-and-rejected).)
 
 ### Managed Agents limitations / surprises hit
 
@@ -414,6 +485,36 @@ Without `ANTHROPIC_API_KEY` the baseline uses a clearly-labelled offline answere
 (stamped into the trace `note`) so Layer-1 branch-correctness still runs in
 credential-less CI; Layer-2 is skipped with a note.
 
+## Honest limitations
+
+Stated plainly so nothing here reads as more than it is (full detail in
+[`SCORECARD.md`](SCORECARD.md)):
+
+- **S&P rating hop is UNVERIFIED (bbby).** Rating-agency press bodies are
+  paywalled (403), so without a configured provider the rating hop returns
+  **UNVERIFIED** rather than a fabricated value. The production request path in
+  `agent/rating.py` is real; only the demo default degrades. This is why both
+  agents miss the bbby fixture.
+- **valaris is a win but pre-named.** Its restructuring support agreement lists
+  ~15 UK debtors (≥4 with 2020 charges), so no unique property identifies the
+  target without naming it. valaris exercises the exhibit → registry → charges
+  chain but, unlike revlon/hertz, it does **not** test *discovery*. Documented,
+  not hidden.
+- **greenrose / wejo fail on path shape, not correctness.** Both agents reach the
+  *correct grounded answer* but via a *shorter* path than the ground-truth model,
+  so they fail the chain/depth check by design (the scorer grades the branch, not
+  just the final answer).
+- **The 3-way table is one run, not an averaged distribution.** LLM outputs
+  vary; the numbers are a single measured session (`make compare`), surfaced to
+  Braintrust, not a mean over seeds. Treat magnitudes (~4x cost, ~3.4x latency,
+  the branch-correct tie) as the signal, not the last digit.
+- **Clean stand-in corpus.** The fixtures are a curated bank of verified public
+  disclosures — a deliberately clean corpus, not messy production inputs. The
+  retrieval/agent *paths* are production-real (real EDGAR + Companies House
+  clients, rate limits, retries, auth); the corpus is the stated simplification.
+- **Self-hosted MA sandbox is a reasoned rejection, not a measured third build**
+  (see [above](#self-hosted-managed-agents-sandbox--rejected)).
+
 ## Layout
 
 ```
@@ -444,8 +545,11 @@ src/credit_risk_monitoring/
 tests/               # loader, classifier, trace round-trip, checks, judge, harness,
                      # + EDGAR/CH clients, authz kill-switch, audit, orchestrator round-trip,
                      # + Arm B (fake Managed Agents client, roster, trace scoring, cost)
-fixtures/            # the 10-fixture bank (from feat/eval-fixtures)
+fixtures/            # the 10-fixture bank
+terraform/           # Arm A (build) production hosting: ACA Job + KV + private-endpoint Postgres
 Dockerfile           # Arm A agent container image (env-only config)
+SCORECARD.md         # the build-vs-buy scorecard (headline result)
+docs/build-vs-buy.md # visual summary (arm architecture + cost/latency/quality charts)
 ```
 
 ## CI
