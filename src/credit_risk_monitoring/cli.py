@@ -137,6 +137,27 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run_skill_experiment(args: argparse.Namespace) -> int:
+    from credit_risk_monitoring.agent_managed.skill_experiment import VARIANTS, run_skill_experiment
+
+    fixtures = load_fixtures(args.fixtures or default_fixtures_path())
+    if args.only:
+        fixtures = [f for f in fixtures if f.id in set(args.only)]
+    elif args.limit:
+        fixtures = fixtures[: args.limit]
+    variants = tuple(args.variants) if args.variants else VARIANTS
+    table = run_skill_experiment(
+        fixtures,
+        trace_root=args.trace_root,
+        out_root=args.out_dir,
+        variants=variants,
+        cleanup=not args.no_cleanup,
+        reuse_existing=args.reuse_existing,
+    )
+    print(table)
+    return 0
+
+
 def _cmd_score(args: argparse.Namespace) -> int:
     fixtures = load_fixtures(args.fixtures or default_fixtures_path())
     outcome = score_traces(
@@ -214,6 +235,40 @@ def main(argv: list[str] | None = None) -> int:
         "--only", nargs="+", default=None, help="only these fixture ids (spend-aware smoke)"
     )
     p_compare.set_defaults(func=_cmd_compare)
+
+    p_skill = sub.add_parser(
+        "run-skill-experiment",
+        help="run + score Arm B with vs without the investigation-discipline Skill",
+    )
+    p_skill.add_argument("--fixtures", type=Path, default=None)
+    p_skill.add_argument(
+        "--trace-root", type=Path, default=Path("traces/skill-exp"),
+        help="root for per-variant trace subdirs (no-skill/skill)",
+    )
+    p_skill.add_argument(
+        "--out-dir", type=Path, default=Path("out/skill-exp"),
+        help="root for per-variant metrics + the rendered experiment table/json",
+    )
+    p_skill.add_argument(
+        "--variants", nargs="+", choices=["no-skill", "skill"], default=None,
+        help="subset of variants to run (default: both)",
+    )
+    p_skill.add_argument(
+        "--limit", type=int, default=None, help="only the first N fixtures (spend-aware smoke)"
+    )
+    p_skill.add_argument(
+        "--only", nargs="+", default=None, help="only these fixture ids (spend-aware smoke)"
+    )
+    p_skill.add_argument(
+        "--no-cleanup", action="store_true",
+        help="do NOT archive the Managed Agents resources this experiment creates",
+    )
+    p_skill.add_argument(
+        "--reuse-existing", action="store_true",
+        help="score a variant from its on-disk traces+metrics instead of re-running it "
+        "(resume a partial run without re-spending on completed variants)",
+    )
+    p_skill.set_defaults(func=_cmd_run_skill_experiment)
 
     p_score = sub.add_parser("score", help="score traces against the fixtures")
     _add_common(p_score)
