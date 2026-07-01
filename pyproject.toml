@@ -7,6 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
     "pyyaml>=6.0",
+    # Arm B (C3b) drives Anthropic Managed Agents directly (client.beta.agents /
+    # environments / sessions), so the SDK is a direct dependency here — the
+    # `managed-agents-2026-04-01` beta surface requires a recent release.
+    "anthropic>=0.115.0",
     # Shared portfolio packages — consumed (never re-implemented) as pinned
     # git-subdirectory references from ai-infra-templates.
     "agent-evals[judge] @ git+https://github.com/claudeaiportfolio/ai-infra-templates.git@agent-evals-v0.2.0#subdirectory=agent-evals",
