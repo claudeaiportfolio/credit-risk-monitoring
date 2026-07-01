@@ -5,6 +5,12 @@ solution's own **Key Vault**, **managed identity**, and a private-endpoint
 **Postgres** audit sink. Per portfolio convention this dir holds only module
 **invocations** + wiring; the module bodies live in `portfolio-infra`.
 
+> **Deployment status:** this stack has been **applied live to Azure and
+> smoke-tested** — an on-demand job execution was started and ran to completion
+> (**Succeeded**), reading its Key Vault secrets and reaching Postgres over the
+> private endpoint — then **torn down** via `make teardown-full`. The runbook
+> below is the repeatable procedure; it is not an unexecuted plan.
+
 ## What it provisions
 
 | Resource | Notes |
