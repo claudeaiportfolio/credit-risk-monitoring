@@ -557,14 +557,19 @@ class EdgarClient:
 
         ``primary_document`` (from the submissions index) pins the body when the
         directory's heuristic pick would be ambiguous; otherwise the largest /
-        first matching ``.htm`` is used.
+        first matching ``.htm`` is used. The pin is honored ONLY if it names a
+        document that actually exists in this accession's directory: a guessed or
+        stale filename falls back to the directory's own primary pick rather than
+        constructing a URL that 404s (which would otherwise abort an
+        investigation on a hallucinated filename).
         """
         directory = self.fetch_filing_directory(cik, accession)
         body_url = ""
         if primary_document:
-            cik_int = str(int(normalize_cik(cik)))
-            acc = accession_nodashes(accession)
-            body_url = f"{_archives_base()}/edgar/data/{cik_int}/{acc}/{primary_document}"
+            match = next(
+                (d for d in directory.documents if d.name == primary_document), None
+            )
+            body_url = match.url if match else ""
         body_url = body_url or directory.primary_document_url
         if not body_url:
             raise ValueError(f"no primary document found for accession {accession!r}")
@@ -605,10 +610,35 @@ def _filing_refs_from_arrays(block: dict) -> list[FilingRef]:
     return out
 
 
+# SEC directory listings interleave the real filing documents with generated
+# wrapper artefacts (the SGML header dump ``*-index-headers.html``, the
+# ``*-index.html`` cover page, the ``R\d+.htm`` XBRL viewer fragments,
+# ``FilingSummary``/``Financial_Report``). None of these is the filing body, but
+# the directory ``type`` field is frequently just an icon name (e.g. ``text.gif``)
+# rather than the document type, so an EX-by-type filter alone lets a wrapper win.
+# Skip wrappers by NAME, and fall back to an exhibit-by-name filter when the type
+# field is uninformative — otherwise the primary pick lands on the index header
+# page (which contains no filing body) and an accession-only open reads garbage.
+_SEC_WRAPPER_RE = re.compile(
+    r"(-index(-headers)?\.html?$)|(^r\d+\.html?$)|(filingsummary)|(financial_report)",
+    re.IGNORECASE,
+)
+_EXHIBIT_NAME_RE = re.compile(r"(_ex[\d.])|(-ex\d)|(^ex-?\d)", re.IGNORECASE)
+
+
 def _pick_primary_document(docs: list[FilingDocument]) -> FilingDocument | None:
-    """Heuristic primary-document pick: the first non-exhibit ``.htm``."""
-    htmls = [d for d in docs if d.name.lower().endswith((".htm", ".html"))]
-    non_ex = [d for d in htmls if not d.type.upper().startswith("EX")]
+    """Heuristic primary-document pick: the first non-exhibit filing ``.htm``,
+    excluding SEC-generated wrapper/index/XBRL-viewer artefacts."""
+    htmls = [
+        d
+        for d in docs
+        if d.name.lower().endswith((".htm", ".html")) and not _SEC_WRAPPER_RE.search(d.name)
+    ]
+    non_ex = [
+        d
+        for d in htmls
+        if not d.type.upper().startswith("EX") and not _EXHIBIT_NAME_RE.search(d.name)
+    ]
     if non_ex:
         return non_ex[0]
     return htmls[0] if htmls else (docs[0] if docs else None)

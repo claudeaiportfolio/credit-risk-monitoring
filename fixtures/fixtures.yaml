@@ -58,58 +58,91 @@ multi_hop:
     classification: multi_hop
     jurisdiction: "US->UK"
     depth: 4
+    # GENUINE-DISCOVERY FRAMING (2026-07): the question does NOT name the target UK
+    # entity, and — unlike valaris/revlon — the SEC filing does not name it either.
+    # Verified against the primary source: the Chapter 11 8-K (acc 0001104659-20-065674,
+    # tm2020858d1_8k.htm) carves out "the direct and indirect subsidiary companies
+    # located outside of the United States and Canada (the 'International Subsidiaries')"
+    # and names only Hertz International Limited + Hertz Holdings Netherlands BV — NOT
+    # the UK receivables-financing entity. So the specific entity is only discoverable
+    # by SEARCHING Companies House. The investigable property "Hertz's UK receivables-
+    # financing subsidiary" uniquely identifies Hertz UK Receivables Ltd (CH 08789381):
+    # a CH search on "Hertz receivables" returns it as the sole "* RECEIVABLES *" hit
+    # (distinct from Hertz Vehicle/Fleet FINANCING entities). The genuine chain is
+    # therefore Chapter 11 8-K -> CH company-search (discover) -> CH profile (confirm)
+    # -> CH charges (holder): edgar_filing -> companies_house x3, depth 4. Every
+    # asserted fact is primary-source verified; the answer (Credit Agricole CIB) is
+    # unchanged from the pre-naming version.
     question: >
-      Hertz's May 2020 Chapter 11 filing explicitly excluded its non-US/Canada
-      subsidiaries. For its UK financing entity Hertz UK Receivables Limited, which
-      bank holds its outstanding registered charges?
+      Hertz's May 2020 Chapter 11 petition excluded its subsidiaries located outside
+      the United States and Canada without naming them individually. Hertz funded its
+      UK operations through a UK receivables-financing subsidiary. Identify that
+      subsidiary and determine which bank holds its outstanding registered charges.
     ground_truth_path:
       - step: 1
-        source: "8-K (Items 1.01/2.04)"
-        locator: "EDGAR acc 0001104659-20-056547 (2020-05-05)"
-        finding: "missed 2020-04-27 payment on the Series 2013-G1 vehicle ABS -> amortization event; forbearance only to 2020-05-22"
-        triggers: "references a Forbearance Agreement exhibit"
-      - step: 2
-        source: "Exhibit EX-10.1 (Forbearance Agreement)"
-        locator: ".../tm2018616d1_ex10-1.htm"
-        finding: "names HVF II ABS subsidiaries; Deutsche Bank as admin agent"
-        triggers: "forbearance expiry -> bankruptcy 8-K"
-      - step: 3
         source: "8-K (Item 1.03)"
-        locator: "EDGAR acc 0001104659-20-065674 (2020-05-26)"
-        finding: "Chapter 11 (Case 20-11218, D. Del.); explicitly EXCLUDES Hertz International Limited, Hertz Holdings Netherlands BV and non-US/Canada subsidiaries from the estate"
-        triggers: "the carve-out clause is the only text naming the international entities -> UK registry"
-      - step: 4
-        source: "Companies House"
+        locator: "EDGAR acc 0001104659-20-065674 (2020-05-26), tm2020858d1_8k.htm"
+        finding: "Chapter 11 (Case 20-11218, D. Del.); carves out 'the direct and indirect subsidiary companies located outside of the United States and Canada (the International Subsidiaries)' — names Hertz International Limited + Hertz Holdings Netherlands BV, but NOT the UK receivables entity"
+        triggers: "the carve-out establishes a CLASS of non-US subs; the specific UK receivables entity must be DISCOVERED at the UK registry"
+      - step: 2
+        source: "Companies House company search"
+        locator: "CH /search/companies q='Hertz receivables'"
+        finding: "search surfaces 'HERTZ UK RECEIVABLES LTD' (no. 08789381) as the sole receivables entity among the Hertz UK companies"
+        triggers: "identified the entity by property -> confirm its record"
+      - step: 3
+        source: "Companies House company record"
         locator: "CH 08789381 (Hertz UK Receivables Limited)"
-        finding: "outstanding registered charges to Credit Agricole CIB (UK analogue of the US ABS that triggered hop 1)"
+        finding: "active UK ltd, registered number 08789381, with outstanding registered charges"
+        triggers: "charges expose who holds the security"
+      - step: 4
+        source: "Companies House charges"
+        locator: "CH 08789381 /charges"
+        finding: "outstanding registered charges held by Credit Agricole Corporate and Investment Bank (Credit Agricole CIB) — created 2013-12-17 and 2014-11-04"
         triggers: terminal
     expected_stop_depth: 4
     expected_answer: >
-      Credit Agricole CIB holds the outstanding registered charges over Hertz UK
-      Receivables Limited (CH 08789381). (Sibling opco Hertz (U.K.) Limited, CH 00597994,
-      carries separate charges to Lombard North Central.)
-    verification_caveats: "A discrete rating-agency hop was not pursued; chain stands without it."
+      Hertz's UK receivables-financing subsidiary is Hertz UK Receivables Limited
+      (CH 08789381); Credit Agricole CIB (Credit Agricole Corporate and Investment
+      Bank) holds its outstanding registered charges. (Sibling opco Hertz (U.K.)
+      Limited, CH 00597994, carries separate charges to Lombard North Central.)
+    verification_caveats: >
+      A discrete rating-agency hop was not pursued; chain stands without it. The entity
+      is discovered by CH search (not pre-named and not named in the 8-K), so the chain
+      is edgar_filing -> CH search -> CH profile -> CH charges (depth 4). The Credit
+      Agricole CIB answer is primary-source verified at Companies House.
 
   - id: revlon-elizabeth-arden-uk-charge
     issuer: { name: "Revlon, Inc. / Revlon Consumer Products", cik: "0000887921 / 0000890547" }
     classification: multi_hop
     jurisdiction: "US->UK"
     depth: 4
+    # GENUINE-DISCOVERY FRAMING (2026-07): the question does NOT name the target
+    # subsidiary. It anchors on an investigable property — "the one filing debtor
+    # incorporated in the United Kingdom" — that the analyst can only establish by
+    # opening Exhibit 99.1 and reading the debtor list. Verified against the primary
+    # source: Exhibit 99.1 lists ~48 filing subsidiaries, of which EXACTLY ONE is
+    # UK-incorporated ("Elizabeth Arden (UK) Ltd."); the others are US (Inc./LLC),
+    # plus a Canada entity and a Puerto Rico entity. So "the sole UK debtor" uniquely
+    # identifies Elizabeth Arden (UK) Ltd without pre-naming it, and the full chain
+    # (8-K -> Exhibit 99.1 -> CH -> charges) is REQUIRED to answer. Ground truth and
+    # depth are unchanged from the pre-naming version; only the question changed.
     question: >
-      Revlon's 2022 Chapter 11 debtor list included a UK subsidiary. For Elizabeth
-      Arden (UK) Ltd, what registered charge was created around Revlon's 2023 emergence,
-      and which US party is the secured party (collateral agent)?
+      Revlon's 2022 Chapter 11 filing listed its filing subsidiaries in an exhibit,
+      exactly one of which is incorporated in the United Kingdom. Identify that UK
+      debtor, and determine what registered charge was created over it around Revlon's
+      2023 emergence from bankruptcy and which US party is its secured party
+      (collateral agent).
     ground_truth_path:
       - step: 1
         source: "8-K (Item 1.03)"
         locator: "EDGAR acc 0001140361-22-023182 (2022-06-16)"
-        finding: "Revlon + subsidiaries filed Chapter 11 (SDNY) 2022-06-15; filing subsidiaries 'listed in Exhibit 99.1'"
-        triggers: "must open Exhibit 99.1 for the debtor list"
+        finding: "Revlon + subsidiaries filed Chapter 11 (SDNY) 2022-06-15; filing subsidiaries 'listed in Exhibit 99.1' — the 8-K body does NOT name the UK debtor"
+        triggers: "must open Exhibit 99.1 for the debtor list to discover the UK entity"
       - step: 2
         source: "Exhibit 99.1 (debtor list)"
         locator: "brhc10038750_ex99-1.htm (same accession)"
-        finding: "names foreign debtor 'Elizabeth Arden (UK) Ltd.'"
-        triggers: "UK entity -> Companies House"
+        finding: "of the ~48 filing subsidiaries, the ONLY UK-incorporated debtor is 'Elizabeth Arden (UK) Ltd.' (rest are US/Canada/Puerto Rico)"
+        triggers: "the sole UK entity -> resolve at Companies House"
       - step: 3
         source: "Companies House"
         locator: "CH 04126357 (Elizabeth Arden (UK) Ltd)"

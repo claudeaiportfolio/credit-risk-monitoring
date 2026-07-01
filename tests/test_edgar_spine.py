@@ -172,6 +172,89 @@ def test_filing_directory_and_body() -> None:
     assert "Entry into RSA." in body.text
 
 
+def test_primary_pick_skips_sec_wrapper_files_when_type_is_uninformative() -> None:
+    """Real EDGAR directories interleave SGML/index wrappers and XBRL-viewer files
+    with the filing docs, and the ``type`` field is often just an icon name
+    (``text.gif``) rather than the document type. The primary pick must skip the
+    ``*-index-headers.html`` wrapper (which has no filing body) and the ``ex*`` /
+    ``R\\d+`` artefacts, landing on the real 8-K body — otherwise an accession-only
+    open reads the header dump and an investigation stalls."""
+    acc = "0001104659-20-065674"
+    index_json = {
+        "directory": {
+            "item": [
+                {"name": f"{acc}-index-headers.html", "type": "text.gif", "description": ""},
+                {"name": f"{acc}-index.html", "type": "text.gif", "description": ""},
+                {"name": "R1.htm", "type": "text.gif", "description": ""},
+                {"name": "tm2020858d1_8k.htm", "type": "text.gif", "description": "FORM 8-K"},
+                {"name": "tm2020858d1_ex10-1.htm", "type": "text.gif", "description": "EXHIBIT 10.1"},
+            ]
+        }
+    }
+    transport = edgar_mock_transport(
+        handlers={
+            "/index.json": json_response(index_json),
+            "tm2020858d1_8k.htm": html_response("<html><body><p>ITEM 1.03 BANKRUPTCY</p></body></html>"),
+        }
+    )
+    with _client(transport) as edgar:
+        directory, body = edgar.fetch_filing("0000047129", acc)
+    assert directory.primary_document_url.endswith("tm2020858d1_8k.htm")
+    assert "index-headers" not in directory.primary_document_url
+    assert "BANKRUPTCY" in body.text
+
+
+def test_fetch_filing_honors_primary_document_pin() -> None:
+    """A primary_document that exists in the directory pins the body."""
+    index_json = {
+        "directory": {
+            "item": [
+                {"name": "big-10k.htm", "type": "10-K", "description": "10-K"},
+                {"name": "tm-8k.htm", "type": "8-K", "description": "8-K body"},
+            ]
+        }
+    }
+    transport = edgar_mock_transport(
+        handlers={
+            "/index.json": json_response(index_json),
+            "tm-8k.htm": html_response("<html><body><p>the 8-K body</p></body></html>"),
+            "big-10k.htm": html_response("<html><body><p>the 10-K</p></body></html>"),
+        }
+    )
+    with _client(transport) as edgar:
+        _dir, body = edgar.fetch_filing(
+            "0000000001", "0001104659-20-096796", primary_document="tm-8k.htm"
+        )
+    assert "the 8-K body" in body.text
+
+
+def test_fetch_filing_falls_back_when_primary_document_not_in_directory() -> None:
+    """A guessed/hallucinated primary_document that is NOT in the directory falls
+    back to the directory's own primary pick instead of building a URL that 404s —
+    so an investigation is not aborted by a wrong filename guess."""
+    index_json = {
+        "directory": {
+            "item": [
+                {"name": "tm-8k.htm", "type": "8-K", "description": "8-K body"},
+                {"name": "ex10-1.htm", "type": "EX-10.1", "description": "RSA"},
+            ]
+        }
+    }
+    transport = edgar_mock_transport(
+        handlers={
+            "/index.json": json_response(index_json),
+            "tm-8k.htm": html_response("<html><body><p>real 8-K body</p></body></html>"),
+        }
+    )
+    with _client(transport) as edgar:
+        # The model guessed a filename that does not exist in this accession.
+        directory, body = edgar.fetch_filing(
+            "0000000001", "0001104659-20-096796", primary_document="ea180000-8k_wrong.htm"
+        )
+    assert directory.primary_document_url.endswith("tm-8k.htm")
+    assert "real 8-K body" in body.text  # fell back to the directory pick, no 404
+
+
 def test_fetch_exhibit_strips_html() -> None:
     transport = edgar_mock_transport(
         handlers={"ex10-1.htm": html_response("<div>Ensco Global Resources Ltd</div>")}
