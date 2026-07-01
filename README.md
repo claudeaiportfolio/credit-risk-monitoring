@@ -485,6 +485,41 @@ Without `ANTHROPIC_API_KEY` the baseline uses a clearly-labelled offline answere
 (stamped into the trace `note`) so Layer-1 branch-correctness still runs in
 credential-less CI; Layer-2 is skipped with a note.
 
+## Residency & compliance posture
+
+The headline judgment of this piece is that **residency is an architected
+choice**, not an afterthought (full treatment in
+[`SCORECARD.md`](SCORECARD.md#residency-as-an-architected-choice-the-fde-judgment)):
+
+- **Persisted state is public data only.** The one durable store is the Postgres
+  **audit sink** (`agent/audit.py`), which records *operational metadata*
+  (`agent_id` / `action` / `tool` / `allowed` / `revoked` / `ts`) over retrievals
+  of **public** sources — never the retrieved content, and no standing watchlist.
+- **The sensitive input is transient.** Which issuers you monitor / the specific
+  question is supplied **per run** and is not persisted agent-side (here that
+  input is a fixture `question`; a production deployment passes a watchlist item
+  the same transient way).
+- **The managed arm's residency line.** Arm B (Managed Agents) runs the loop on
+  **Anthropic-side inference**, so retrieved content flows through Anthropic →
+  **not ZDR / HIPAA-eligible**. For *this public-data* workload that trade can go
+  toward buy; for a **private-data variant** it disqualifies Arm B and residency
+  forces build. The honest headline: *managed lowers engineering cost but raises
+  governance cost.*
+- **Compliance posture (awareness-only, not a certification):** workload identity
+  → Key Vault secret refs (no secrets in code or image; `terraform/`); audit
+  logging on **every** agent/tool/authz action, which is what makes the
+  **kill-switch auditable** (revokes are checked on every call and recorded).
+
+**Scoped deviations from the scoping doc** (documented, not papered over):
+
+- Arm B exposes tools as **host-side custom tools** (Arm A's own `TOOL_REGISTRY`
+  over the session event stream), **not an MCP connector** — reasoned: no new
+  public ingress + an identical tool surface across both arms.
+- This piece does **live-API investigation** over EDGAR / Companies House rather
+  than reusing piece 1's hybrid + rerank corpus retrieval — reasoned: the task
+  shape is **API navigation** (traverse live registries in dependency order), not
+  corpus search over a fixed document set.
+
 ## Honest limitations
 
 Stated plainly so nothing here reads as more than it is (full detail in

@@ -210,6 +210,88 @@ a fabricated fourth column would not be.
 
 ---
 
+## Residency as an architected choice (the FDE judgment)
+
+This is the piece's headline judgment, and it is deliberately an *architecture*
+decision, not an afterthought. State it as three lines:
+
+**1. Where the residency line sits.** The agent's **persisted state is public
+data only**. Concretely, the one durable store is the Postgres **audit sink**
+(`agent/audit.py`), which records *operational metadata* — `agent_id`, `action`,
+`tool`, `allowed`/`revoked`, `reason`, `ts` — over retrievals of **public**
+primary sources (SEC EDGAR, UK Companies House, rating actions, news). It does
+**not** persist the retrieved filing content, and it does not persist a standing
+"watchlist" of issuers. The one mildly-sensitive input — *which issuers you are
+monitoring / the specific question* — is supplied **transiently per run** as the
+investigation input and is **not** persisted agent-side. (In this reference
+implementation that per-run input is a fixture `question`; a production
+deployment would pass the watchlist item the same transient way, not stand up a
+persisted watchlist datastore.) So the sensitive dimension never becomes durable
+agent state.
+
+**2. Which side of the line the managed offering sits on.** **Arm B (Managed
+Agents) is not ZDR / HIPAA-eligible**: Anthropic runs the loop, so the retrieved
+primary-source content necessarily flows through **Anthropic-side inference**
+(true for *any* MA tool-exposure choice — see the residency point above). Arm A
+keeps both the fetch and the model-context content on operator-controlled
+infrastructure.
+
+**3. How the architecture stays on the safe side of it.** Because the persisted
+state and the retrieved content are **public**, and the sensitive watchlist input
+is **transient**, the Anthropic-side inference in Arm B processes only public
+disclosure content — so for *this* workload the managed offering sits on the
+acceptable side of the residency line. For a **private-data variant** (regulated
+exposure data, internal credit memos, PII), the same content-through-Anthropic
+fact would **disqualify Arm B**, and the residency requirement would force Arm A.
+
+**The honest headline — not "managed is bad":** *managed lowers engineering cost
+but raises governance cost.* For a **public-data** workload that trade can
+legitimately go **toward managed**; for a **private-data** workload the
+governance cost (no ZDR/HIPAA) is disqualifying and the trade goes toward build.
+The residency requirement of the *data*, not a preference, is what picks the arm.
+
+## Compliance posture (awareness-only)
+
+Awareness-level posture, stated in non-certification language — this is reference
+code, not a certified system. Three controls carry it:
+
+- **Workload identity → Key Vault (no secrets in code or image).** Arm A's
+  Container App Job authenticates with a **user-assigned managed identity** that
+  is granted *Key Vault Secrets User*; `ANTHROPIC_API_KEY`,
+  `COMPANIES_HOUSE_API_KEY`, and `AUDIT_DATABASE_URL` are **Key Vault secret
+  references** resolved at runtime, never baked into the image or the repo
+  (`terraform/`). Arm B keeps its secrets host-side in the process environment.
+- **Audit logging on every agent/tool action (what makes the kill-switch
+  auditable).** Every authorization decision, tool execution, and admin
+  revoke/deny is written as an `AuditEvent` (who = `agent_id`, what =
+  `action`/`tool`, when = `ts`, plus `allowed`/`revoked`) to the Postgres sink in
+  production (in-memory fallback otherwise). Because the auth boundary is checked
+  **on every call** against token scope + TTL + deny-list + admin-revoke, a
+  revoke takes effect **mid-workflow** — and the audit log is the durable record
+  that proves what the kill-switch did.
+- **Residency as an architected choice** — as above: public-only persisted state,
+  transient sensitive input, and an explicit read of which arm each data
+  classification permits.
+
+## Scoped deviations from the scoping doc
+
+Documented, not papered over — each is a reasoned, scoped choice:
+
+- **Arm B exposes tools as host-side custom tools, not an MCP connector** (as the
+  scoping doc envisioned). The custom-tool handlers are **Arm A's own
+  `TOOL_REGISTRY`** run host-side over the session event stream. Reasoned: it
+  stands up **no new public ingress** (the orchestrator is an SSE *client*, not a
+  server a remote-MCP endpoint would require) and gives an **identical tool
+  surface across both arms** (the strongest form of the "reuse the tool code"
+  bar). The residency profile is unchanged either way (model inference is the
+  binding constraint under MA, not the tool-exposure mechanism).
+- **This piece does live-API investigation over EDGAR / Companies House, not a
+  reuse of piece 1's hybrid + rerank corpus retrieval.** Reasoned: the task shape
+  here is **API navigation** (traverse a dependency chain of live registries and
+  filings), not **corpus search** over a fixed document set — so a live-client
+  spine with rate limits, retries, and pagination is the correct primitive, and a
+  vector/rerank retriever would be the wrong tool for the job.
+
 ## When to choose build vs buy
 
 Both arms clear the same task bar, so the decision is driven entirely by
