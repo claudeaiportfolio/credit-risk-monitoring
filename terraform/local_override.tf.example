@@ -1,0 +1,13 @@
+// Copy to `local_override.tf` (git-ignored; Terraform auto-merges *_override.tf)
+// for a LAPTOP apply after `az login`. It overrides the base azurerm provider
+// to use the Azure CLI credential instead of OIDC.
+//
+// Also export the subscription (never committed):
+//   export ARM_SUBSCRIPTION_ID=<sub-guid>
+//   export ARM_TENANT_ID=<tenant-guid>   # optional; az login usually supplies it
+
+provider "azurerm" {
+  features {}
+  use_oidc = false
+  use_cli  = true
+}
