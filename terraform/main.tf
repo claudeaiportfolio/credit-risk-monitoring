@@ -158,12 +158,8 @@ module "postgres" {
 # App JOB with a manual (on-demand) trigger — a scale-to-zero Container App with
 # no ingress would deploy but never wake (a facade). An operator starts a run
 # with `az containerapp job start` (which is also how it is smoke-tested).
-#
-# TODO(Phase 2): re-pin ref to the tag cut from the portfolio-infra `aca` PR
-# (expected tf-modules-v0.3.0). Placeholder pin below is intentionally invalid
-# until that tag exists — do not apply before re-pinning.
 module "aca" {
-  source = "git::https://github.com/claudeaiportfolio/portfolio-infra.git//terraform/modules/aca?ref=tf-modules-vNEXT"
+  source = "git::https://github.com/claudeaiportfolio/portfolio-infra.git//terraform/modules/aca?ref=tf-modules-v0.3.0"
 
   workload_kind = "job"
 

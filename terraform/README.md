@@ -16,7 +16,7 @@ solution's own **Key Vault**, **managed identity**, and a private-endpoint
 | `azurerm_key_vault_secret.this` | The app's secrets (values from git-ignored tfvars at deploy time). |
 | `azurerm_role_assignment.app_acr_pull` | UAMI **AcrPull** on the shared ACR. |
 | `module.postgres` (`tf-modules-v0.2.0`) | Flexible server + replica, **real private endpoint** (`enable_private_endpoints = true`) wired to the shared network. DB name `creditrisk` (not the module's default). |
-| `module.aca` (`tf-modules-vNEXT` — re-pin) | Arm A as a **Container App Job** (`workload_kind = "job"`, manual/on-demand trigger): VNet-integrated on the shared `aca-environment` subnet, internal environment (no public exposure), image from ACR, secrets from KV via the UAMI. |
+| `module.aca` (`tf-modules-v0.3.0`) | Arm A as a **Container App Job** (`workload_kind = "job"`, manual/on-demand trigger): VNet-integrated on the shared `aca-environment` subnet, internal environment (no public exposure), image from ACR, secrets from KV via the UAMI. |
 
 The app reads (all from `os.environ`): `ANTHROPIC_API_KEY`,
 `COMPANIES_HOUSE_API_KEY`, `AUDIT_DATABASE_URL`, optional `BRAINTRUST_API_KEY`
@@ -67,9 +67,8 @@ The app reads (all from `os.environ`): `ANTHROPIC_API_KEY`,
 
 ## Phase 2 runbook (human — after Deliverable 1 is merged + tagged)
 
-1. **Tag** `portfolio-infra` at the `aca` PR merge as `tf-modules-v0.3.0`.
-2. **Re-pin** `module.aca` `ref=tf-modules-vNEXT` → `ref=tf-modules-v0.3.0` in
-   `main.tf`.
+1. ~~**Tag** `portfolio-infra` at the `aca` PR merge as `tf-modules-v0.3.0`.~~ (done)
+2. ~~**Re-pin** `module.aca` → `ref=tf-modules-v0.3.0` in `main.tf`.~~ (done)
 3. **Build + push** the image to ACR (see repo root `Dockerfile`):
    ```
    az acr login -n <ACR_NAME>
