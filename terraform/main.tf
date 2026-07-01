@@ -102,6 +102,12 @@ locals {
     "braintrust-api-key"      = var.braintrust_api_key
   }
   active_secrets = { for k, v in local.secret_values : k => v if v != "" }
+  # Secret NAMES are not sensitive (only their values are), but building the map
+  # from sensitive vars marks the whole collection sensitive — and Terraform
+  # forbids a sensitive `for_each`. Unwrap just the key set so it can drive
+  # for_each; the looked-up values stay sensitive. (Whether an optional secret
+  # is present is not meaningful leakage.)
+  active_secret_keys = nonsensitive(toset(keys(local.active_secrets)))
 
   # KV secret name -> the env var the app reads it as.
   secret_env_name = {
@@ -110,15 +116,15 @@ locals {
     "audit-database-url"      = "AUDIT_DATABASE_URL"
     "braintrust-api-key"      = "BRAINTRUST_API_KEY"
   }
-  secret_env_vars = { for k, _ in local.active_secrets : local.secret_env_name[k] => k }
+  secret_env_vars = { for k in local.active_secret_keys : local.secret_env_name[k] => k }
 
   image = "${data.azurerm_container_registry.shared.login_server}/${var.image_repository}:${var.image_tag}"
 }
 
 resource "azurerm_key_vault_secret" "this" {
-  for_each     = local.active_secrets
+  for_each     = local.active_secret_keys
   name         = each.key
-  value        = each.value
+  value        = local.active_secrets[each.key]
   key_vault_id = azurerm_key_vault.this.id
 
   # Wait for the deployer's write grant before creating secrets. (RBAC role
