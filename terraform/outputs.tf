@@ -38,7 +38,7 @@ output "postgres_database_name" {
   value       = module.postgres.database_name
 }
 
-output "container_app_name" {
-  description = "Name of the deployed Container App (null until the aca module is re-pinned + applied)."
-  value       = module.aca.container_app_name
+output "job_name" {
+  description = "Name of the deployed Container App Job. Start a run (and smoke test) with: az containerapp job start --name <job_name> --resource-group <resource_group_name>. Null until the aca module is re-pinned + applied."
+  value       = module.aca.job_name
 }

@@ -62,8 +62,14 @@ variable "image_tag" {
   default     = "latest"
 }
 
-variable "aca_max_replicas" {
-  description = "Max replica count for the Arm A app (min is 0 — scale-to-zero)."
+variable "job_replica_timeout_in_seconds" {
+  description = "Max time (s) an Arm A job run may execute before being terminated."
+  type        = number
+  default     = 3600
+}
+
+variable "job_replica_retry_limit" {
+  description = "Retries for a failed Arm A job run."
   type        = number
   default     = 1
 }

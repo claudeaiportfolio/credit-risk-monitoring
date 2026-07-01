@@ -13,7 +13,10 @@ postgres_sku_name   = "GP_Standard_D2ds_v5"
 postgres_storage_mb = 32768
 
 image_repository = "credit-risk-monitoring"
-aca_max_replicas = 1
+
+# Arm A runs as an on-demand Container App Job (episodic run-to-completion).
+job_replica_timeout_in_seconds = 3600
+job_replica_retry_limit        = 1
 
 tags = {
   solution    = "credit-risk-monitoring"

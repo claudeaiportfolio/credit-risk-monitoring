@@ -16,7 +16,7 @@ solution's own **Key Vault**, **managed identity**, and a private-endpoint
 | `azurerm_key_vault_secret.this` | The app's secrets (values from git-ignored tfvars at deploy time). |
 | `azurerm_role_assignment.app_acr_pull` | UAMI **AcrPull** on the shared ACR. |
 | `module.postgres` (`tf-modules-v0.2.0`) | Flexible server + replica, **real private endpoint** (`enable_private_endpoints = true`) wired to the shared network. DB name `creditrisk` (not the module's default). |
-| `module.aca` (`tf-modules-vNEXT` — re-pin) | Arm A: VNet-integrated on the shared `aca-environment` subnet, **internal-only** (no public ingress), **scale-to-zero**, image from ACR, secrets from KV via the UAMI. |
+| `module.aca` (`tf-modules-vNEXT` — re-pin) | Arm A as a **Container App Job** (`workload_kind = "job"`, manual/on-demand trigger): VNet-integrated on the shared `aca-environment` subnet, internal environment (no public exposure), image from ACR, secrets from KV via the UAMI. |
 
 The app reads (all from `os.environ`): `ANTHROPIC_API_KEY`,
 `COMPANIES_HOUSE_API_KEY`, `AUDIT_DATABASE_URL`, optional `BRAINTRUST_API_KEY`
@@ -24,16 +24,24 @@ The app reads (all from `os.environ`): `ANTHROPIC_API_KEY`,
 
 ## Design decisions & documented deviations
 
+- **Arm A deploys as a Container App JOB, not a Container App** (revision of an
+  earlier "ACA app" shorthand). Arm A is **episodic**: the entrypoint
+  (`credit-risk-eval run-agent`) runs one investigation to completion and exits.
+  A scale-to-zero Container App with no ingress would deploy green but never
+  wake — a facade. A **Job** with a manual (on-demand) trigger is the correct
+  primitive, and lets an operator actually start (and smoke-test) a real run via
+  `az containerapp job start`. Scheduled/event triggers are a future option in
+  the module; Arm A uses manual.
 - **Own Key Vault, not the shared dev vault.** Production ACA must not depend on
   the shared `localdevenv` vault. This provisions a per-solution KV; secret
   *values* are copied in at deploy time (Phase 2) from `localdevenv`
   (`anthropic-portfolio-key`, `credit-risk-monitoring-ch-api-key`,
   `credit-risk-monitoring-braintrust`).
 - **Secret values pass through Terraform state** (KV-secrets-from-variables).
-  Chosen for a single clean `apply` and so the Container App's first revision
-  can read the refs on create. State lives in the private backend storage
-  account. *Deviation from "no secrets in code":* values are in git-ignored
-  `secrets.auto.tfvars`, never tracked; the tradeoff is state-resident secrets.
+  Chosen for a single clean `apply` and so the job's first execution can read
+  the refs. State lives in the private backend storage account. *Deviation from
+  "no secrets in code":* values are in git-ignored `secrets.auto.tfvars`, never
+  tracked; the tradeoff is state-resident secrets.
 - **Plain UAMI, not the shared `identity` module.** That module federates UAMIs
   to Kubernetes ServiceAccounts (AKS workload identity) — not applicable to
   Container Apps, which reference the UAMI directly.
@@ -86,10 +94,17 @@ The app reads (all from `os.environ`): `ANTHROPIC_API_KEY`,
    admin password but does not output it — reset it (or create a dedicated app
    role), assemble `AUDIT_DATABASE_URL`
    (`postgresql://<user>:<pass>@<postgres_primary_fqdn>:5432/creditrisk?sslmode=require`),
-   set it in `secrets.auto.tfvars`, and re-apply so the KV secret + app env are
+   set it in `secrets.auto.tfvars`, and re-apply so the KV secret + job env are
    wired. (If the very first secret create races RBAC propagation, just re-run.)
-7. **Smoke**: confirm the revision is provisioned and the app can read its KV
-   secrets / reach Postgres over the private endpoint.
+7. **Smoke**: start an on-demand execution and watch it run to completion:
+   ```
+   az containerapp job start --name "$(terraform output -raw job_name)" \
+     --resource-group "$(terraform output -raw resource_group_name)"
+   az containerapp job execution list --name "$(terraform output -raw job_name)" \
+     --resource-group "$(terraform output -raw resource_group_name)" -o table
+   ```
+   Confirm the run reads its KV secrets and reaches Postgres over the private
+   endpoint (check the job execution logs in Log Analytics).
 8. **Teardown**: `make teardown-full` (deletes THIS RG + `az aks stop` the
    shared cluster; never deletes shared infra).
 

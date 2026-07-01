@@ -152,24 +152,35 @@ module "postgres" {
   tags = var.tags
 }
 
-# --- Arm A on Azure Container Apps -----------------------------------------
+# --- Arm A on Azure Container Apps (a JOB) ---------------------------------
+# Arm A is EPISODIC: the entrypoint (`credit-risk-eval run-agent`) runs one
+# investigation to completion and exits. The correct primitive is a Container
+# App JOB with a manual (on-demand) trigger — a scale-to-zero Container App with
+# no ingress would deploy but never wake (a facade). An operator starts a run
+# with `az containerapp job start` (which is also how it is smoke-tested).
+#
 # TODO(Phase 2): re-pin ref to the tag cut from the portfolio-infra `aca` PR
 # (expected tf-modules-v0.3.0). Placeholder pin below is intentionally invalid
 # until that tag exists — do not apply before re-pinning.
 module "aca" {
   source = "git::https://github.com/claudeaiportfolio/portfolio-infra.git//terraform/modules/aca?ref=tf-modules-vNEXT"
 
+  workload_kind = "job"
+
   resource_group_name = azurerm_resource_group.this.name
   location            = var.location
   name_prefix         = var.name_prefix
   loc_short           = var.loc_short
 
-  # VNet-integrated on the shared ACA subnet, internal-only, scale-to-zero.
-  infrastructure_subnet_id   = local.aca_subnet_id
-  internal_ingress_only      = true
-  min_replicas               = 0
-  max_replicas               = var.aca_max_replicas
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
+  # VNet-integrated on the shared ACA subnet, internal environment (no public
+  # exposure). Manual on-demand trigger; one run per execution.
+  infrastructure_subnet_id       = local.aca_subnet_id
+  internal_ingress_only          = true
+  log_analytics_workspace_id     = azurerm_log_analytics_workspace.this.id
+  job_replica_timeout_in_seconds = var.job_replica_timeout_in_seconds
+  job_replica_retry_limit        = var.job_replica_retry_limit
+  job_parallelism                = 1
+  job_replica_completion_count   = 1
 
   image                     = local.image
   registry_server           = data.azurerm_container_registry.shared.login_server
@@ -186,7 +197,7 @@ module "aca" {
 
   tags = var.tags
 
-  # The first revision reads the KV secrets on create -> the app identity must
+  # The first job execution reads the KV secrets -> the app identity must
   # already hold Secrets User and the secrets must exist.
   depends_on = [
     azurerm_role_assignment.app_kv_secrets_user,
