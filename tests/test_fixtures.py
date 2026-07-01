@@ -38,19 +38,35 @@ def test_derives_expected_chain() -> None:
     assert control.expected_stop_depth == 1
 
 
-def test_hertz_chain_is_the_realigned_three_hop_model() -> None:
-    """The hertz question pre-names the UK entity, so its answer's dependency chain
-    is Chapter 11 8-K -> CH profile -> CH charges (the same shape as valaris/revlon:
-    filing[s] + profile + charges), NOT the analyst's original forbearance-exhibit
-    discovery route. Locks in the documented hop-granularity realignment."""
+def test_hertz_chain_is_the_ch_search_discovery_model() -> None:
+    """The hertz question does NOT name the UK entity, and neither does the Chapter 11
+    8-K (it carves out the 'International Subsidiaries' as a class). So the specific
+    receivables entity must be DISCOVERED via a Companies House company-search hop:
+    Chapter 11 8-K -> CH search -> CH profile -> CH charges, depth 4. Locks in the
+    genuine-discovery framing (the entity is found by property, never pre-named)."""
     by_id = fixtures_by_id(load_fixtures(default_fixtures_path()))
     hertz = by_id["hertz-uk-receivables-charge-holder"]
     assert hertz.expected_chain == (
         SourceType.EDGAR_FILING,
         SourceType.COMPANIES_HOUSE,
         SourceType.COMPANIES_HOUSE,
+        SourceType.COMPANIES_HOUSE,
     )
-    assert hertz.expected_stop_depth == 3
+    assert hertz.expected_stop_depth == 4
+    # The question must not pre-name the target entity (genuine discovery).
+    assert "Hertz UK Receivables" not in hertz.question
+    assert "08789381" not in hertz.question
+
+
+def test_reworded_questions_do_not_pre_name_their_target() -> None:
+    """Integrity guard: the discovery-reworded questions must not contain the exact
+    registered name (or CH number) of the entity the analyst is supposed to discover."""
+    by_id = fixtures_by_id(load_fixtures(default_fixtures_path()))
+    revlon = by_id["revlon-elizabeth-arden-uk-charge"]
+    assert "Elizabeth Arden (UK)" not in revlon.question
+    assert "04126357" not in revlon.question
+    hertz = by_id["hertz-uk-receivables-charge-holder"]
+    assert "Hertz UK Receivables" not in hertz.question
 
 
 def test_question_and_answer_whitespace_normalised() -> None:

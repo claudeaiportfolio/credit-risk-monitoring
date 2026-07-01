@@ -184,7 +184,7 @@ def _h_companies_house(clients: Clients, args: dict) -> HopOutcome:
             raise ValueError("companies_house operation=search requires a query (company name)")
         items = ch.search_companies(query)
         lines = [
-            f"- {it.get('company_name')} (no. {it.get('company_number')}, {it.get('company_status')})"
+            f"- {_search_item_name(it)} (no. {it.get('company_number')}, {it.get('company_status')})"
             for it in items[:20]
         ]
         text = f"Companies House search for {query!r}:\n" + ("\n".join(lines) or "- (no matches)")
@@ -372,14 +372,22 @@ def _registry() -> dict[str, ToolDef]:
             ToolSpec(
                 name=SourceType.COMPANIES_HOUSE.value,
                 description=(
-                    "Query UK Companies House for a company named in an SEC exhibit. "
-                    "operation=profile (the company record: status/type), charges (registered "
-                    "security + who holds it), officers, filing_history, or search (raw name "
-                    "lookup). For profile/charges/officers/filing_history you may pass EITHER a "
-                    "company_number OR query=<the company name>: a name is resolved to its "
-                    "registered number for you (exact-name match) within that one call, so you "
-                    "do NOT need a separate search step and should NOT profile multiple "
-                    "candidates. Make only the calls the question needs."
+                    "Query UK Companies House. operation=profile (the company record: "
+                    "status/type/number), charges (registered security + who holds it), "
+                    "officers, filing_history, or search (name lookup returning candidate "
+                    "companies with their names, numbers and statuses).\n"
+                    "TWO usage modes:\n"
+                    "1. You ALREADY KNOW the exact registered name: call profile/charges with "
+                    "query=<the company name> — the name is resolved to its number (exact-name "
+                    "match) INSIDE that one call, so you do NOT need a separate search step and "
+                    "must NOT profile multiple candidates.\n"
+                    "2. DISCOVERY — you only know the entity by a PROPERTY, not its exact name "
+                    "(e.g. 'the parent's UK receivables-financing subsidiary', because the SEC "
+                    "filing named only a class of subsidiaries): FIRST operation=search with a "
+                    "query built from the brand + the distinguishing keyword (e.g. 'Hertz "
+                    "receivables'), read the returned candidates, pick the ONE matching the "
+                    "property, THEN profile its number, THEN charges. "
+                    "Make only the calls the question needs."
                 ),
                 input_schema={
                     "type": "object",
@@ -517,6 +525,15 @@ _COMPANY_SUFFIX_RE = re.compile(
 )
 
 
+def _search_item_name(item: dict) -> str:
+    """The display name of a Companies House search hit. The ``/search/companies``
+    endpoint returns the name under ``title`` (not ``company_name``, which is the
+    field on the *profile* endpoint), so prefer ``title`` and fall back to
+    ``company_name`` — otherwise every search result renders as ``None`` and the
+    agent cannot pick the right entity during discovery."""
+    return str(item.get("title") or item.get("company_name") or "").strip()
+
+
 def _normalize_company_name(name: str) -> str:
     """Fold a company name to a comparable core: lowercase, drop punctuation and
     common legal suffixes (Ltd/Limited/PLC/…) so ``"Ensco Global Resources Ltd"``
@@ -537,18 +554,16 @@ def _resolve_company_number(ch: CompaniesHouseClient, query: str) -> tuple[str, 
     if not items:
         raise ValueError(f"no Companies House company matches name {query!r}")
     nq = _normalize_company_name(query)
-    exact = [it for it in items if _normalize_company_name(str(it.get("company_name", ""))) == nq]
+    exact = [it for it in items if _normalize_company_name(_search_item_name(it)) == nq]
     contains = [
-        it
-        for it in items
-        if nq and nq in _normalize_company_name(str(it.get("company_name", "")))
+        it for it in items if nq and nq in _normalize_company_name(_search_item_name(it))
     ]
     chosen = (exact or contains or items)[0]
     num = _opt_str(chosen.get("company_number"))
     if num is None:
         raise ValueError(f"Companies House match for {query!r} has no company number")
     note = (
-        f"\n[resolved name {query!r} -> {chosen.get('company_name')} "
+        f"\n[resolved name {query!r} -> {_search_item_name(chosen)} "
         f"(no. {num}, status {chosen.get('company_status')})]"
     )
     return num, note

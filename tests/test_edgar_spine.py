@@ -172,6 +172,38 @@ def test_filing_directory_and_body() -> None:
     assert "Entry into RSA." in body.text
 
 
+def test_primary_pick_skips_sec_wrapper_files_when_type_is_uninformative() -> None:
+    """Real EDGAR directories interleave SGML/index wrappers and XBRL-viewer files
+    with the filing docs, and the ``type`` field is often just an icon name
+    (``text.gif``) rather than the document type. The primary pick must skip the
+    ``*-index-headers.html`` wrapper (which has no filing body) and the ``ex*`` /
+    ``R\\d+`` artefacts, landing on the real 8-K body — otherwise an accession-only
+    open reads the header dump and an investigation stalls."""
+    acc = "0001104659-20-065674"
+    index_json = {
+        "directory": {
+            "item": [
+                {"name": f"{acc}-index-headers.html", "type": "text.gif", "description": ""},
+                {"name": f"{acc}-index.html", "type": "text.gif", "description": ""},
+                {"name": "R1.htm", "type": "text.gif", "description": ""},
+                {"name": "tm2020858d1_8k.htm", "type": "text.gif", "description": "FORM 8-K"},
+                {"name": "tm2020858d1_ex10-1.htm", "type": "text.gif", "description": "EXHIBIT 10.1"},
+            ]
+        }
+    }
+    transport = edgar_mock_transport(
+        handlers={
+            "/index.json": json_response(index_json),
+            "tm2020858d1_8k.htm": html_response("<html><body><p>ITEM 1.03 BANKRUPTCY</p></body></html>"),
+        }
+    )
+    with _client(transport) as edgar:
+        directory, body = edgar.fetch_filing("0000047129", acc)
+    assert directory.primary_document_url.endswith("tm2020858d1_8k.htm")
+    assert "index-headers" not in directory.primary_document_url
+    assert "BANKRUPTCY" in body.text
+
+
 def test_fetch_filing_honors_primary_document_pin() -> None:
     """A primary_document that exists in the directory pins the body."""
     index_json = {

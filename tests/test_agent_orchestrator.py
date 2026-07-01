@@ -434,6 +434,76 @@ async def test_companies_house_resolves_name_to_exact_match_in_one_hop() -> None
     assert tw.depth_reached == 2  # profile + charges only — no extra candidate profiling
 
 
+def _companies_house_search_discovery() -> CompaniesHouseClient:
+    """CH client whose /search/companies returns the REAL API shape — names under
+    ``title`` (not ``company_name``) — with several 'Hertz * UK' candidates; only
+    'HERTZ UK RECEIVABLES LTD' matches the receivables property."""
+    search_items = {
+        "items": [
+            {"title": "HERTZ (U.K.) LIMITED", "company_number": "00597994",
+             "company_status": "active"},
+            {"title": "HERTZ VEHICLE FINANCING U.K. LIMITED", "company_number": "10000001",
+             "company_status": "active"},
+            {"title": "HERTZ UK RECEIVABLES LTD", "company_number": "08789381",
+             "company_status": "active"},
+        ]
+    }
+    profile = {
+        "company_number": "08789381", "company_name": "Hertz UK Receivables Limited",
+        "company_status": "active", "type": "ltd", "date_of_creation": "2013-11-14",
+    }
+    charges = {
+        "items": [
+            {"charge_code": "087893810002", "status": "outstanding", "created_on": "2014-11-04",
+             "classification": {"description": "A registered charge"},
+             "persons_entitled": [{"name": "Credit Agricole Corporate and Investment Bank"}]},
+        ],
+        "total_results": 1,
+    }
+    transport = edgar_mock_transport(
+        handlers={
+            "/search/companies": json_response(search_items),
+            "/charges": json_response(charges),
+            "/company/": json_response(profile),
+        }
+    )
+    inner = httpx.Client(transport=transport, base_url=_CH_BASE, auth=httpx.BasicAuth("k", ""))
+    return CompaniesHouseClient(client=inner, limiter=RateLimiter(0.0))
+
+
+async def test_companies_house_search_discovers_entity_and_renders_titles() -> None:
+    """Discovery path: an operation=search hop renders candidate NAMES from the real
+    API's ``title`` field (regression — the endpoint has no ``company_name``, so a
+    ``company_name`` lookup rendered every hit as None and the agent could not pick
+    the entity). Then profile+charges resolve the discovered receivables entity."""
+    sink = InMemoryAuditSink()
+    broker = AuthorityBroker(audit=sink)
+    tw = _started_writer()
+    tools = (SourceType.COMPANIES_HOUSE.value,)
+    token = broker.mint("entity_resolution", set(tools))
+    ctx = AuthContext("entity_resolution", token, broker, frozenset(tools))
+    router = ToolRouter(
+        auth=ctx, allowed_tools=tools,
+        clients=Clients(edgar=_edgar(), companies_house=_companies_house_search_discovery()),
+        trace=tw, turn=1,
+    )
+
+    found = await router.call_tool("companies_house", {"operation": "search", "query": "Hertz receivables"})
+    assert "HERTZ UK RECEIVABLES LTD" in found  # real title rendered, not "None"
+    assert "None" not in found
+    assert "08789381" in found
+
+    profile = await router.call_tool(
+        "companies_house", {"operation": "profile", "company_number": "08789381"}
+    )
+    assert "Hertz UK Receivables Limited" in profile
+    charges = await router.call_tool(
+        "companies_house", {"operation": "charges", "company_number": "08789381"}
+    )
+    assert "Credit Agricole Corporate and Investment Bank" in charges
+    assert tw.depth_reached == 3  # search + profile + charges (discovery)
+
+
 async def test_submissions_browse_filter_surfaces_buried_filing() -> None:
     """The submissions-index BROWSE filter also surfaces the buried 2020 8-K's
     accession (form+date), recorded as an EDGAR_SUBMISSIONS_INDEX hop. Unfiltered,

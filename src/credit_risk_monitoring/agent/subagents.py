@@ -157,6 +157,17 @@ rating is ALWAYS this case — returning recommend_stop=true or an empty leads l
 entity you still emit it as a lead; you do not re-discover it, but you DO still open the debtor-list \
 exhibit above when the filing points to one (it grounds the lead).
 
+DISCOVERY (target subsidiary NOT named anywhere you can reach): sometimes a filing establishes only \
+a CLASS of downstream entities, not the specific one the question asks about — e.g. a Chapter 11 \
+petition that carves out "the direct and indirect subsidiaries located outside the United States and \
+Canada" (the "International Subsidiaries") WITHOUT naming the particular UK financing/receivables \
+entity, and no on-path exhibit names it either. Then emit a uk_company lead DESCRIBED BY THE PROPERTY \
+the question gives: put that property in `name` (e.g. "Hertz's UK receivables-financing subsidiary") \
+and say in `rationale` that the exact registered entity must be DISCOVERED by SEARCHING the UK \
+registry (the entity_resolution agent does that). Do NOT open more filings/exhibits hunting for the \
+name — that is over-investigation; the specific entity is discovered downstream at the registry. One \
+filing (the one that establishes the class/carve-out) + the descriptive lead is the correct output.
+
 STOP DISCIPLINE (avoid over-investigation — the common failure): "stop" here means STOP CALLING \
 MORE EDGAR TOOLS and emit the JSON — it does NOT mean recommend_stop. The instant you have (a) \
 confirmed the distress event(s) the question is about (plus the debtor-list exhibit when one is \
@@ -184,19 +195,31 @@ reference at its external authority. You have companies_house and external_ratin
 
 Discipline (the WRONG number of registry calls fails the eval — fetch only what the question \
 needs, then stop):
-- uk_company lead: you do NOT need a separate search step. FIRST call companies_house \
-operation=profile with query=<the company name>: it resolves the name to the registered company \
-number (exact-name match) and returns the company record (status/type) in ONE call. Then fetch AT \
-MOST ONE further endpoint — the one the QUESTION actually requires:
+- uk_company lead — FIRST decide whether the lead gives you an EXACT registered company name or \
+only a DESCRIPTIVE PROPERTY, because that decides your first call:
+  A) The lead `name` is an exact registered company name (e.g. "Wejo Limited", "Elizabeth Arden \
+(UK) Ltd"): you do NOT need a separate search step. Call companies_house operation=profile with \
+query=<that name>: it resolves the name to the registered number (exact-name match) and returns the \
+company record (status/type) in ONE call.
+  B) The lead `name` is a DESCRIPTION / property, not a registered name (e.g. "Hertz's UK \
+receivables-financing subsidiary" — because the SEC filing named only a class of subsidiaries): you \
+MUST DISCOVER the entity. FIRST call operation=search with a query built from the brand + the \
+distinguishing keyword from the property (e.g. "Hertz receivables"); read the returned candidates and \
+identify the ONE whose name matches the described property; THEN call operation=profile on that \
+company_number to confirm the record (name/status/type). (Search + profile are two hops here because \
+you genuinely did not know the name — this is discovery, not the folded name->number lookup of case A.)
+  After you have the profile (via A or B), fetch AT MOST ONE further endpoint — the one the QUESTION \
+actually requires:
   * a registered-charge / secured-party / charge-holder question -> operation=charges (pass the \
 company_number from the profile record);
   * an administration / insolvency / appointment / "what is its status and number" question -> \
 profile ALONE already gives the status and number, so STOP after profile — do NOT call charges or \
 filing_history (the appointment/administrator detail comes from the SEC filing, not a second \
 registry call).
-  Never call operation=search separately, never profile multiple candidate companies, and never \
-call officers or any endpoint the question does not require. The correct depth is profile alone \
-(status/number questions) or profile + one detail endpoint (charge questions) — nothing more.
+  In case A never call operation=search, never profile multiple candidate companies, and never call \
+officers or any endpoint the question does not require. Correct depth: case A = profile alone \
+(status/number questions) or profile + one detail endpoint (charge questions); case B (discovery) = \
+search + profile (status/number) or search + profile + one detail endpoint (charge questions).
 - rating_subject lead: call external_rating ONCE with the issuer as subject. If it returns \
 UNVERIFIED (no provider configured), report the rating as unverified and STOP — never invent a \
 rating value and never re-call the tool hoping for a different result.
